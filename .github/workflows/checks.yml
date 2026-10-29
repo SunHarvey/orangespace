@@ -69,6 +69,11 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          trap {
+            $failure = ($_.Exception.Message + "`n" + $_.ScriptStackTrace).Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=CEF validation failure::$failure"
+            exit 1
+          }
           $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
           $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (!$installation) { throw 'MSVC installation not found' }
@@ -77,4 +82,12 @@ jobs:
           $lock = Get-Content apps/windows-client/cef/cef.lock.json -Raw | ConvertFrom-Json
           $archive = Join-Path $env:RUNNER_TEMP $lock.archive
           Invoke-WebRequest -Uri $lock.archive_url -OutFile $archive
-          ./scripts/cef-build-windows.ps1 -Archive $archive -BuildDirectory (Join-Path $env:RUNNER_TEMP ('orangespace-cef-' + [guid]::NewGuid().ToString('N')))
+          $logPath = Join-Path $env:RUNNER_TEMP 'orangespace-cef-build.log'
+          try {
+            ./scripts/cef-build-windows.ps1 -Archive $archive -BuildDirectory (Join-Path $env:RUNNER_TEMP ('orangespace-cef-' + [guid]::NewGuid().ToString('N'))) *>&1 | Tee-Object -FilePath $logPath
+          } catch {
+            $details = if (Test-Path $logPath) { (Get-Content $logPath -Tail 60) -join "`n" } else { $_.Exception.Message }
+            $details = $details.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=CEF build diagnostics::$details"
+            throw
+          }
