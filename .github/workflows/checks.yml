@@ -1,0 +1,59 @@
+name: Checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  core-and-tunnel:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust checks
+        run: |
+          cargo fmt --all -- --check
+          cargo test --workspace --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo build --workspace --locked
+      - name: Native model checks
+        run: |
+          cmake -S . -B build
+          cmake --build build
+          ctest --test-dir build --output-on-failure
+      - name: Verify actual TUIC TCP and UDP
+        run: |
+          curl -fL --retry 3 https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64.tar.gz -o /tmp/sing-box.tar.gz
+          echo '699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968  /tmp/sing-box.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/sing-box.tar.gz -C /tmp
+          python3 scripts/smoke_tuic.py --sing-box /tmp/sing-box-1.14.4-linux-amd64/sing-box
+  node:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: orangespace_test
+          POSTGRES_USER: orangespace_test
+          POSTGRES_PASSWORD: ci-only-not-a-deployment-secret
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U orangespace_test -d orangespace_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: python -m pip install -r requirements.lock -e '.[test]'
+        working-directory: server
+      - run: python -m pytest
+        working-directory: server
+        env:
+          ORANGESPACE_TEST_POSTGRES_URL: postgresql+psycopg://orangespace_test:ci-only-not-a-deployment-secret@127.0.0.1:5432/orangespace_test
+      - name: Real HTTP file lifecycle
+        run: python scripts/smoke_node.py
+  windows-manager:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native manager and block-only WFP component
+        shell: pwsh
+        run: ./scripts/build-windows.ps1

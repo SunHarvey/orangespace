@@ -1,0 +1,25 @@
+[Unit]
+Description=OrangeSpace personal file node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=orangespace
+Group=orangespace
+WorkingDirectory=/opt/orangespace/server
+EnvironmentFile=/etc/orangespace/node.env
+ExecStart=/opt/orangespace/venv/bin/uvicorn orangespace_node.app:create_app --factory --host 127.0.0.1 --port 8080 --no-access-log
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+StateDirectory=orangespace
+ReadWritePaths=/var/lib/orangespace
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

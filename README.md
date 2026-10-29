@@ -1,5 +1,9 @@
 # 橙域 OrangeSpace
 
+<p align="center">
+  <img src="assets/brand/orangespace-logo-approved.png" width="160" alt="橙域 OrangeSpace Logo">
+</p>
+
 **远方的网络，眼前的工作空间。**
 
 Windows 上的多个独立浏览工作区，分别使用指定 Linux 节点的网络；同一节点上的多用户分别拥有自己的个人文件区。浏览器程序共用，Cookie、登录状态及网站数据按沙盒保存在 Windows 本机。
@@ -77,7 +81,6 @@ python3 scripts/smoke_tuic.py --sing-box /absolute/path/to/sing-box
 
 它测试同一目标地址经两个通道得到不同节点回包、并发 TCP/native UDP、一侧节点失效不影响另一侧，以及防护未完成时 broker 拒绝打开浏览器。它**不证明** Windows 已接管流量或 DNS 无泄漏。
 
-部署草案见 [部署说明](deploy/README.md)，整体边界见 [架构说明](docs/architecture.md)，本机实际运行结果见 [验证记录](docs/verification.md)。GitHub Actions 工作流已提供，但尚未推送或执行。
+部署草案见 [部署说明](deploy/README.md)，整体边界见 [架构说明](docs/architecture.md)，本机实际运行结果见 [验证记录](docs/verification.md)。GitHub Actions 提供 Linux/Windows 构建、测试和隧道检查，执行结果以仓库 Actions 页面为准。
 
 本仓库独立编写；IdenGrid 只作为架构参考，未复制其代码。第三方组件和品牌资源说明见 [THIRD_PARTY.md](THIRD_PARTY.md)。
-
