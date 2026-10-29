@@ -15,7 +15,13 @@
 - Windows 实机：临时服务在全新、管理员保护的 Program Files 子目录中运行，读取 SCM 验证 LocalSystem、精确二进制路径与 PID，启动/停止通过；服务、进程和目录均清理。该桌面会话断开，没有验收已安装服务的 active-WTS 端点或管理窗口。
 - CEF：官方索引匹配固定版本；实际下载 minimal 包 175051364 字节，核对 SHA-1 并新增项目 SHA-256 锁；完整安全解包、真实头文件/layout 校验通过。bootstrap/host 两个源文件的 MinGW 编译探针通过；不是 MSVC 链接、sandbox 启动或可运行浏览器。
 
-**未验证/未完成**：管理窗口登录接入、服务与 broker/helper 串联、持久凭据库、真实 HTTPS 节点登录与 TLS 负例、独立第二账号、active-WTS 多会话、CEF 的 MSVC 链接与 sandbox 子进程、WFP TCP/UDP/受管 DNS/抓包、完整浏览器与文件桥、安装/驱动签名分发。CI 已增加精确 CEF compile-only 检查，执行结果另行核实；不以待执行配置声称通过。
+- 后续 CI（提交 `cc26506`，run `40898175322`）：Linux、PostgreSQL、Windows 三项全部通过。Windows 原生组件 MSVC 编译及固定 CEF wrapper/client.dll 编译链接、导出、bootstrap 复制哈希检查均通过；依然没有启动 CEF 或验收 sandbox。
+- 真实 runtime 增量：`ORANGESPACE_TEST_SING_BOX` 显式运行 helper_runtime 通过，两个 sing-box 进程由 Rust supervisor 通过 stdin 配置，分别认证，跨沙盒密码拒绝，关闭 A 不影响 B，drop 后监听关闭。该项默认 ignored，不能由普通 cargo test 冒充已执行。
+- 真实 Windows TLS 负例：新建受保护的管理员测试 catalog，原生 NodeSession 对不受信 TLS 服务返回保留的 WinHTTP `12175`，服务端记录 1 个 TCP 连接、0 字节 HTTP 应用数据。未修改证书库，配置和测试文件清理通过。服务端 TLS 握手可完成后再被 Windows 拒绝，不能错误声称 handshake 一定失败。
+
+- 最新 UI/IPC 增量：统一 CMake/CTest 6/6 通过；Windows 实机通过工作区认证控制器、服务缺失/会话 0 的 IPC 负例、节点会话 100 项校验。IPC 负例不是已安装服务握手验收。13 项 Python 脚本／依赖闭包测试通过；TLS fixture 的独立超时清理、上传顺序和成功输出时机已补回归，并在真实 Windows 重跑成功。
+
+**未验证/未完成**：管理窗口成功登录和交互验收、服务与 broker/helper 串联、持久凭据库、成功的真实 HTTPS 节点登录及其余 TLS/重定向负例、独立第二账号、active-WTS 多会话、CEF sandbox 子进程、WFP TCP/UDP/受管 DNS/抓包、完整浏览器与文件桥、安装/驱动签名分发。
 
 相关复现：`apps/windows-service/README.md`、`docs/client-login.md`、`docs/cef-build.md`、`docs/delivery-plan.md`。
 

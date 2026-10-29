@@ -24,6 +24,7 @@ jobs:
           echo '699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968  /tmp/sing-box.tar.gz' | sha256sum -c -
           tar -xzf /tmp/sing-box.tar.gz -C /tmp
           python3 scripts/smoke_tuic.py --sing-box /tmp/sing-box-1.14.4-linux-amd64/sing-box
+          ORANGESPACE_TEST_SING_BOX=/tmp/sing-box-1.14.4-linux-amd64/sing-box cargo test -p orangespace-core --locked --test helper_runtime -- --ignored
   node:
     runs-on: ubuntu-24.04
     services:
@@ -44,8 +45,8 @@ jobs:
           python-version: '3.14'
       - run: python -m pip install -r requirements.lock -e '.[test]'
         working-directory: server
-      - name: CEF pinned-package offline validation (not a CEF build)
-        run: python -m unittest discover -s scripts -p test_cef_package.py -v
+      - name: Dependency lock and offline fixture validation (not browser validation)
+        run: python -m unittest discover -s scripts -p 'test_*.py' -v
       - run: python -m pytest
         working-directory: server
         env:

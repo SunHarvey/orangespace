@@ -19,11 +19,11 @@ Windows 上的多个独立浏览工作区，分别使用指定 Linux 节点的�
 | Linux 文件服务 | FastAPI、PostgreSQL/SQLite、账号和令牌、个人目录、上传/下载/目录/删除 |
 | Windows 网络防护 | WFP 持久阻断基础工具；新增 SCM Service/受限 IPC 和 DPAPI 原语，尚未接管实际流量 |
 | 完整浏览器 | 固定 CEF 版本与独立 bootstrap/client.dll compile-only 构建链；不是完整浏览器，默认不参与构建 |
-| 客户端登录 | 新增独立 HTTPS 登录诊断组件与管理员保护节点清单；认证后读取真实用户身份，管理窗口集成待完成 |
+| 客户端登录 | 管理窗口已接入管理员保护节点清单和真实 HTTPS 登录组件；身份来自认证回复，真实成功登录/交互验收仍待完成 |
 | helper 生命周期 | 每沙盒完整绑定的真实子进程启动、stdin 配置、停止/回收；尚未接入受保护服务与 WFP |
 | 浏览器文件桥 | 已确定接口与任务归属规则；尚未接入浏览器文件选择、下载回调 |
 
-当前 UI 输入的用户 UUID 仍是开发用本机工作区标识，不是服务端登录。第一阶段新增模块尚未构成完整受保护启动链：独立登录组件不替代 UI 集成，DPAPI 原语不等于持久凭据库，helper 回收不等于 WFP。进度与验收边界见 [分阶段交付](docs/delivery-plan.md)、[登录组件](docs/client-login.md)、[服务基础](apps/windows-service/README.md) 和 [CEF 构建验证](docs/cef-build.md)。
+管理窗口不再以手输 UUID 作为身份：使用可信清单别名和服务端认证会话，拒绝账号、节点、过期或迟到结果混用；CLI 的 UUID 参数仍仅用于本机开发操作。第一阶段尚未构成完整受保护启动链：UI 登录代码接入不等于真实成功登录验收，DPAPI 原语不等于持久凭据库，secret-free SCM 状态校验不等于凭据 IPC，helper 回收不等于 WFP。进度与边界见 [分阶段交付](docs/delivery-plan.md)、[窗口登录](docs/windows-login-ui.md)、[登录组件](docs/client-login.md)、[服务基础](apps/windows-service/README.md) 和 [CEF 构建验证](docs/cef-build.md)。
 
 ## 目录
 
@@ -83,6 +83,6 @@ python3 scripts/smoke_tuic.py --sing-box /absolute/path/to/sing-box
 
 它测试同一目标地址经两个通道得到不同节点回包、并发 TCP/native UDP、一侧节点失效不影响另一侧，以及防护未完成时 broker 拒绝打开浏览器。它**不证明** Windows 已接管流量或 DNS 无泄漏。
 
-部署草案见 [部署说明](deploy/README.md)，整体边界见 [架构说明](docs/architecture.md)，本机实际运行结果见 [验证记录](docs/verification.md)。GitHub Actions 提供 Linux/Windows 构建、测试和隧道检查，执行结果以仓库 Actions 页面为准。
+部署草案见 [部署说明](deploy/README.md)，授权测试节点的隔离部署与来源核验见 [节点验证](docs/node-staging-validation.md)，整体边界见 [架构说明](docs/architecture.md)，实际运行结果见 [验证记录](docs/verification.md)。GitHub Actions 提供 Linux/Windows 构建、测试和隧道检查，执行结果以仓库 Actions 页面为准。
 
 本仓库独立编写；IdenGrid 只作为架构参考，未复制其代码。第三方组件和品牌资源说明见 [THIRD_PARTY.md](THIRD_PARTY.md)。

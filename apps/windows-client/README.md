@@ -17,7 +17,7 @@ Copy-Item target/release/orangespace-broker.exe build/windows-client/Release/
 & build/windows-client/Release/OrangeSpace.exe
 ```
 
-界面中的用户 UUID 只是开发阶段的本机工作区选择器，不是登录凭据，也不向 Linux 证明身份。节点服务的认证与文件 API 使用独立令牌。正式 UI 登录、节点清单导入、凭据存储和文件面板尚待接入。
+管理窗口已替换手输用户/节点 UUID 的路径：先验证管理员保护的节点清单，选择可信别名，再通过 HTTPS 登录和 `/v1/me` 取得真实身份；同名账号不会自动跨节点合并。实现与限制见 [窗口登录](../../docs/windows-login-ui.md)。当前已完成控制器测试与交叉编译，尚未完成真实 HTTPS 登录和交互验收。服务端令牌撤销、刷新、DPAPI 持久存储和文件面板仍待接入。
 
 “绑定节点”当前只调用 broker 固定节点 ID；不会伪造隧道已经建立。“打开浏览器”由 broker 和管理器两处拒绝，没有配置或命令行开关可以解除。
 

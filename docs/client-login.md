@@ -1,9 +1,10 @@
 # Windows native login: stage-1 foundation slice
 
-This is a standalone native C++20 component and console diagnostic, **not UI
-integration or a completed Windows client**. The existing manager's manual user
-UUID remains a development-only local workspace selector. This component does
-not launch a browser, configure WFP/DNS, install a service, or bypass any guard.
+This native C++20 component and console diagnostic remain independently testable.
+The management UI now calls the same trusted loader/login API; see
+`docs/windows-login-ui.md`. Source integration and policy tests are **not a
+completed successful-login or interactive Windows acceptance**. This component
+neither launches browsers nor configures WFP/DNS or bypasses any guard.
 No IdenGrid code or new third-party dependency is used.
 
 ## Authentication and trust boundary
@@ -213,10 +214,32 @@ with Users write access; its fixture directory was removed in `finally`.
 The native console import table contains only ADVAPI32, KERNEL32, msvcrt and
 WINHTTP; it does not depend on MinGW runtime DLLs.
 
-**Not yet verified:** MSVC/SDK build, interactive password entry/echo restoration,
-real HTTPS login against the node API, successful/failed TLS chains and
-revocation, adversarial redirect/chunk/header behavior over real WinHTTP,
-concurrent file-replacement/reparse attacks, a separate ordinary local user's
-write-denial exercise, session expiry on a live server, and UI integration.
-Portable response fixtures are validation tests, not proof of an actual login.
-No CEF/WFP/DNS safety claim follows from these tests.
+**Follow-up evidence:** the foundation native targets compiled with MSVC in CI
+at `cc26506`. The real WinHTTP negative fixture now checks preserved native secure
+failure `12175` and independently records zero HTTP application bytes at a fresh
+untrusted TLS endpoint. `WinHttpSendRequest` captures its native error before
+handle cleanup can overwrite it. No certificate store is changed.
+
+```sh
+# Explicitly authorized SSH test host only; existing key is never copied.
+# Build orangespace-node-tls-rejection-tests first with the Windows toolchain.
+python3 scripts/smoke_windows_tls_rejection.py \
+  --ssh-target testuser@192.0.2.20 \
+  --identity /secure/existing_key --known-hosts /secure/known_hosts \
+  --bind-ip 192.0.2.10 \
+  --test-executable /path/to/orangespace-node-tls-rejection-tests.exe
+```
+
+The fixture uses synthetic credentials only, a newly protected administrator-owned
+catalog and an ephemeral self-signed certificate. It needs an elevated SSH test
+token and a reachable local bind address. The ordinary CTest invocation returns
+skip `77` without explicit fixture inputs; that skip is not TLS validation. TLS
+may complete on the server side before WinHTTP rejects the certificate; only the
+native secure error plus zero HTTP application bytes constitute this test's proof.
+
+**Not yet verified:** interactive password entry/echo restoration, successful real
+HTTPS login against the node API, valid-chain/revocation and adversarial
+redirect/chunk/header cases over real WinHTTP, concurrent file-replacement/reparse
+attacks, a separate ordinary local user's write-denial exercise, session expiry on
+a live server, and UI integration. Portable response fixtures are validation tests,
+not proof of an actual login. No CEF/WFP/DNS safety claim follows from these tests.

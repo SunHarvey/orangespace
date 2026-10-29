@@ -4,7 +4,9 @@
 
 这是独立、手工选择的 **Windows x64/MSVC compile-only 验证路径**，不是可运行浏览器或发布包。父级管理器的 CEF 默认仍关闭，broker/UI 浏览器门禁不得解除。`host_component.cc` 只提供一个 Chrome-style BrowserView/Window 接入位置，不能当成完整标签浏览器。
 
-实际已执行 Linux 离线包校验/安全解包测试、C++ 兼容性与无条件拒绝策略测试、官方索引/固定提交源码查询；接手集成时实际下载固定 minimal 包，核对官方 SHA-1、计算并锁定 SHA-256，完整解包和 header/layout 检查通过。使用该真实包完成 bootstrap/host 两个源文件的 MinGW 编译探针，修正 `CefRequestContextHandler` 缺少完整定义的编译错误。此探针不是 MSVC 链接或 CEF 运行验收。**尚未执行** Windows MSVC 编译链接、DLL 导出实测、CEF 启动、Chromium sandbox/LPAC、WFP/DNS 或浏览器功能验收。没有下载 Chromium 源码或运行浏览器；未改项目许可证。
+实际已执行 Linux 离线包校验/安全解包测试、C++ 兼容性与无条件拒绝策略测试、官方索引/固定提交源码查询；接手集成时实际下载固定 minimal 包，核对官方 SHA-1、计算并锁定 SHA-256，完整解包和 header/layout 检查通过。使用该真实包完成 bootstrap/host 两个源文件的 MinGW 编译探针，修正 `CefRequestContextHandler` 缺少完整定义的编译错误。此探针不是 MSVC 链接或 CEF 运行验收。**尚未执行** CEF 启动、Chromium sandbox/LPAC、WFP/DNS 或浏览器功能验收。没有下载 Chromium 源码或运行浏览器；未改项目许可证。
+
+**后续 Windows CI 已验证**：提交 `cc26506` 的 `windows-manager` 在 GitHub 托管 Windows/MSVC 环境通过完整 native 构建及独立 CEF compile-only 步骤，包括 wrapper 编译、`client.dll` 链接、`RunWinMain` 导出检查与 bootstrap 复制哈希一致性（run `40898175322`）。先前 VS 生成器硬编码、Windows 路径反斜杠进入 vendor macro 的错误已按真实 CI 输出修正。该结果不涉及 CEF 启动、Chromium sandbox 子进程或网络隔离。
 
 ## 固定依赖与可核对来源
 

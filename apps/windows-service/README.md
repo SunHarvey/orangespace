@@ -140,7 +140,7 @@ test token: a fresh administrator-protected Program Files fixture, exact copied 
 LocalSystem registration readback, actual SCM start/stop and process-path verification,
 then verified service and fixture deletion. This did not alter existing product services.
 
-**Not performed:** MSVC/SDK build, active-WTS endpoint enumeration and multi-session
+**Not performed:** active-WTS endpoint enumeration and multi-session
 lifecycle under the installed service, actual second-account denial, server
 authentication mapping, any browser/network isolation gate. The desktop was disconnected
 for the SCM lifecycle smoke test, so no active session endpoint was exercised.

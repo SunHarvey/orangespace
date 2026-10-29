@@ -2,7 +2,7 @@
 
 当前未达到开放条件。此列表是实现验收要求，不表示项目已通过。
 
-第一阶段增量：Windows 11 build 26200 已跑原生 DPAPI/IPC/令牌/超时测试及临时 LocalSystem SCM 启停；节点登录组件已跑响应与 ACL 校验，尚未实际 HTTPS 登录或接入管理窗口。CEF 固定包已校验并做真实头文件编译探针，MSVC/完整 sandbox 仍待验证。详细实际执行见 `docs/verification.md`。任何部分通过都不改变浏览器门禁。
+第一阶段增量：Windows 11 build 26200 已跑原生 DPAPI/IPC/令牌/超时测试及临时 LocalSystem SCM 启停；节点登录组件与管理窗口代码已接入，已跑身份／节点／过期／迟到结果策略与 ACL 校验；尚未完成成功的真实 HTTPS 登录和窗口交互验收。CEF 固定包已校验，独立 bootstrap/client.dll 的 Windows/MSVC 编译链接、导出和复制哈希检查已在 CI 通过；完整 sandbox 运行仍待验证。详细实际执行见 `docs/verification.md`。任何部分通过都不改变浏览器门禁。
 
 1. VS2022/Windows SDK 原生编译、管理器实际操作、broker 的 OS 身份和 IPC ACL。
 2. 与固定 CEF 版本匹配的现代 bootstrap/client.dll；Chromium sandbox 启用、API hash 校验、所有子进程身份归属可追踪。

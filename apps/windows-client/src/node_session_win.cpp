@@ -9,6 +9,7 @@
 #include <array>
 #include <chrono>
 #include <memory>
+#include <system_error>
 
 namespace orangespace::node_session {
 namespace {
@@ -170,9 +171,15 @@ class Transport {
     headers.text = L"Accept: application/json\r\nContent-Type: application/json\r\nCache-Control: no-store\r\n";
     if (!token.empty()) { headers.text += L"Authorization: Bearer "; headers.text.append(token.begin(), token.end()); headers.text += L"\r\n"; }
     if (body.size() > 16384) fail("credential request exceeds limit");
-    checked(WinHttpSendRequest(request.get(), headers.text.c_str(), static_cast<DWORD>(headers.text.size()),
-                               body.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(body.data()),
-                               static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0), "HTTPS send failed");
+    if (!WinHttpSendRequest(request.get(), headers.text.c_str(), static_cast<DWORD>(headers.text.size()),
+                            body.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(body.data()),
+                            static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0)) {
+      // Preserve the native error before WinHTTP handle cleanup overwrites it.
+      // The exception contains only a constant operation and OS error, no body,
+      // authorization header, response data or credential material.
+      const DWORD error = GetLastError();
+      throw std::system_error(static_cast<int>(error), std::system_category(), "HTTPS send failed");
+    }
     checked(WinHttpReceiveResponse(request.get(), nullptr), "HTTPS response failed");
     Response response;
     DWORD status = 0, size = sizeof(status);

@@ -2,7 +2,7 @@
 
 此目录现在有独立、显式选择的 Windows x64/MSVC **compile-only** 工程。它编译 `host_component.cc` 和 `bootstrap_client_win.cc`，链接 `client.dll`，并将同版本官方 `bootstrap.exe` 原样复制为 `client.exe`。默认管理器构建仍不包含 CEF；此目录不改动父级 `ORANGESPACE_WITH_CEF=OFF` 默认值。
 
-`cef.lock.json` 固定 CEF **156.0.14+g4fa4ab5+chromium-156.0.8078.48**、Windows API **15600**、发行包校验和及 sandbox compatibility hash。来源、命令与验证范围见 [`docs/cef-build.md`](../../../docs/cef-build.md)。固定版本不代表该二进制已在 Windows 构建或运行通过。
+`cef.lock.json` 固定 CEF **156.0.14+g4fa4ab5+chromium-156.0.8078.48**、Windows API **15600**、发行包校验和及 sandbox compatibility hash。来源、命令与验证范围见 [`docs/cef-build.md`](../../../docs/cef-build.md)。固定版本的 Windows/MSVC compile-only 构建已在 CI 通过，仍未运行或验收 Chromium sandbox/浏览器。
 
 ## 明确不提供的能力
 
