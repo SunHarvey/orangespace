@@ -1,5 +1,7 @@
 #include "orangespace/windows_service.hpp"
+#include "orangespace/process_observation_acl.hpp"
 #include <wtsapi32.h>
+#include <sddl.h>
 #include <atomic>
 #include <map>
 #include <memory>
@@ -70,31 +72,40 @@ struct Worker {
         if (thread.joinable()) thread.join();
     }
 };
-std::map<DWORD, Peer> active_peers() {
+std::map<DWORD, Peer> logged_on_peers() {
+    static_assert(WTSActive == 0 && WTSDisconnected == 4);
     PWTS_SESSION_INFOW sessions{};
     DWORD count{};
     if (!WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &sessions, &count)) fail("WTSEnumerateSessions");
     struct Free { PWTS_SESSION_INFOW p; ~Free() { WTSFreeMemory(p); } } free_sessions{sessions};
     std::map<DWORD, Peer> result;
     for (DWORD i = 0; i < count; ++i) {
-        if (sessions[i].State != WTSActive || sessions[i].SessionId == 0) continue;
+        if ((sessions[i].State != WTSActive && sessions[i].State != WTSDisconnected) ||
+            sessions[i].SessionId == 0) continue;
         HANDLE raw{};
         // Only trusted LocalSystem code obtains identities; requests never select a SID/session.
         if (!WTSQueryUserToken(sessions[i].SessionId, &raw)) continue;
         const Handle token(raw);
         const Peer peer = token_peer(token.get());
-        if (peer.session != sessions[i].SessionId || !peer.logon || !pipe_sddl(peer.sid)) continue;
+        if (!eligible_session(static_cast<std::uint32_t>(sessions[i].State), sessions[i].SessionId, peer)) continue;
         if (result.size() >= max_sessions) throw std::runtime_error("too many interactive sessions");
         result.emplace(peer.session, peer);
     }
     return result;
 }
+void publish_observation_acl(ProcessObservationAcl& acl, const std::map<DWORD, Peer>& peers) {
+    // Retain only query-limited + synchronize handles for SCM PID/death checks.
+    // User SID grants span logons; pipe authorization still checks SID/session/LUID.
+    acl.publish(peers);
+}
 void run_service() {
     // No console mode and no impersonated/user-configured service identity fallback.
     if (current_peer().sid != "S-1-5-18") throw std::runtime_error("LocalSystem service context required");
+    ProcessObservationAcl observation_acl;
     std::map<DWORD, std::unique_ptr<Worker>> workers;
     while (WaitForSingleObject(service_stop.get(), 0) == WAIT_TIMEOUT) {
-        const auto peers = active_peers();
+        const auto peers = logged_on_peers();
+        publish_observation_acl(observation_acl, peers);
         for (auto it = workers.begin(); it != workers.end();) {
             if (it->second->failed) throw std::runtime_error("pipe worker failed");
             const auto found = peers.find(it->first);

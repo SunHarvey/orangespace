@@ -42,6 +42,14 @@ inline std::optional<std::string> pipe_sddl(std::string_view sid) {
     return "D:P(A;;GA;;;SY)(A;;0x12019b;;;" + std::string(sid) + ")";
 }
 struct Peer { std::string sid; std::uint32_t session{}; std::uint64_t logon{}; };
+// WTS_CONNECTSTATE_CLASS values: Active=0, Disconnected=4. State alone never
+// authorizes an endpoint. os_token must come from successful WTSQueryUserToken
+// and TokenUser/TokenSessionId/TokenStatistics extraction, never request claims.
+inline bool eligible_session(std::uint32_t state, std::uint32_t session,
+                             const std::optional<Peer>& os_token) {
+    return (state == 0 || state == 4) && session != 0 && os_token &&
+        os_token->session == session && os_token->logon != 0 && pipe_sddl(os_token->sid).has_value();
+}
 inline bool authorize_peer(const Peer& expected, const Peer& actual) {
     return !expected.sid.empty() && expected.session != 0 && expected.logon != 0 &&
         expected.sid == actual.sid && expected.session == actual.session && expected.logon == actual.logon;

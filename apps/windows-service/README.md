@@ -1,8 +1,8 @@
 # Windows service foundation (Phase 1)
 
 This is an independently buildable C++20 **SCM service foundation**, not an authenticated
-broker replacement and not a usable secure browser. The existing management UI remains
-on its offline/development path. Nothing here launches a browser, helper, shell, or network
+broker replacement and not a usable secure browser. The management UI is not yet integrated
+with this service for credential-bearing authorization or broker launch. Nothing here launches a browser, helper, shell, or network
 connection. Browser-open always returns `browser_guard_unavailable`; there is no readiness,
 console, unsafe, or sandbox-bypass option.
 
@@ -11,10 +11,10 @@ console, unsafe, or sandbox-bypass option.
 - `OrangeSpaceService.exe` registers `OrangeSpaceFoundation` with the Windows Service
   Control Manager, handles interrogate/stop/shutdown, and cancels pending pipe I/O on stop.
   Direct execution fails with Windows error 1063; extra arguments fail with error 87.
-- It requires LocalSystem. `WTSEnumerateSessions` + `WTSQueryUserToken` discover active
-  interactive sessions; each endpoint binds the OS token's **SID, session ID and logon
+- It requires LocalSystem. `WTSEnumerateSessions` + `WTSQueryUserToken` discover logged-on Active or Disconnected
+  sessions; each endpoint binds the OS token's **SID, session ID and logon
   AuthenticationId/LUID**, not a client-supplied account UUID. Tokens are closed immediately.
-  Up to 64 active sessions are supported. Session changes are reconciled every second;
+  Up to 64 eligible logged-on sessions are supported. Session changes are reconciled every second;
   old logon tokens cannot authenticate to a new session's endpoint.
 - Each endpoint is `\\.\pipe\OrangeSpace.Foundation.v1.session.<OS-session-id>`.
   `PIPE_REJECT_REMOTE_CLIENTS` enforces local transport. A protected, explicit DACL grants
@@ -32,9 +32,10 @@ console, unsafe, or sandbox-bypass option.
 
 Local administrators/SYSTEM and malware already running as the authorized Windows user
 are not isolated from that user's identity or DPAPI data by this design. Client-side server
-identity/capability authentication is **not yet integrated**; no UI client uses these pipes.
-An eventual credential-bearing client must verify the SCM-owned server identity before
-sending secrets. The current protocol deliberately carries no secrets.
+identity authentication is implemented in the native status client: SCM binding, a retained
+service process handle, actual pipe-server PID, canonical response and ACK. The management
+UI and credential-bearing capability flow are **not yet integrated**. The current protocol
+deliberately carries no secrets.
 
 ## Wire protocol v1
 
@@ -147,6 +148,21 @@ for the SCM lifecycle smoke test, so no active session endpoint was exercised.
 The real SCM lifecycle must be tested on an explicitly authorized Windows test host with
 the binary installed in an administrator-controlled, non-user-writable directory; do not
 register a LocalSystem service whose executable/DLLs can be replaced by an ordinary user.
+
+## Installed status IPC and DACL correction
+
+The real limited-client handshake, pending-read cancellation and fresh handshake after
+SCM restart were exercised in an existing Disconnected session without changing RDP state.
+The service grants only query-limited/synchronize observation rights to OS-validated peers,
+retaining an immutable original process DACL and its deny semantics; it never rebuilds
+SYSTEM/Administrators policy. Removed peers lose only service-managed new-handle grants.
+Native AccessCheck regression and the DACL correction passed independent review.
+User-SID observation spans logons, existing handles cannot be revoked, and privileged
+concurrent descriptor updates have no atomic compare-and-swap guarantee.
+
+Exact evidence, reproduction and unverified cases are in
+[`docs/service-ipc-validation.md`](../../docs/service-ipc-validation.md). This is still
+secret-free status IPC, not completed Phase 1, credential IPC, helper containment or WFP.
 
 Microsoft API references:
 - https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights
