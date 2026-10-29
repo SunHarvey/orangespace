@@ -17,7 +17,31 @@ endif()
 
 if(WIN32)
   enable_language(RC)
-  add_executable(OrangeSpace WIN32 src/main_win.cpp src/broker_win.cpp src/app.rc)
+  add_executable(OrangeSpace WIN32 src/main_win.cpp src/broker_win.cpp)
+  if(MSVC)
+    # Let MSVC merge and embed the manifest once. An RC-embedded copy would
+    # collide with the linker's generated RT_MANIFEST resource (CVT1100).
+    target_sources(OrangeSpace PRIVATE src/app.manifest)
+    if(BUILD_TESTING)
+      if(CMAKE_MT)
+        set(ORANGESPACE_MANIFEST_TOOL "${CMAKE_MT}")
+      else()
+        # Visual Studio may locate the SDK internally while CMAKE_MT is unset.
+        get_filename_component(_orangespace_rc_directory "${CMAKE_RC_COMPILER}" DIRECTORY)
+        find_program(ORANGESPACE_MANIFEST_TOOL NAMES mt.exe
+          HINTS "${_orangespace_rc_directory}"
+          PATHS "[HKEY_LOCAL_MACHINE/SOFTWARE/Microsoft/Windows Kits/Installed Roots;KitsRoot10]/bin/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/x64"
+          REGISTRY_VIEW HOST REQUIRED)
+      endif()
+      add_test(NAME windows-application-manifest COMMAND ${CMAKE_COMMAND}
+        "-DMT_EXECUTABLE=${ORANGESPACE_MANIFEST_TOOL}"
+        "-DAPPLICATION=$<TARGET_FILE:OrangeSpace>"
+        "-DOUTPUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/verified-$<CONFIG>.manifest"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_manifest.cmake")
+    endif()
+  else()
+    target_sources(OrangeSpace PRIVATE src/app.rc)
+  endif()
   target_link_libraries(OrangeSpace PRIVATE orangespace_client_model comctl32 shell32 user32 gdi32)
   target_compile_definitions(OrangeSpace PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
   target_include_directories(OrangeSpace PRIVATE src)
