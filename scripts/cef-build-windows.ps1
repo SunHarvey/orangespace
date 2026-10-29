@@ -23,7 +23,10 @@ $Package = Join-Path $BuildDirectory 'cef-package'
 & $Python (Join-Path $PSScriptRoot 'cef_package.py') --archive $Archive --extract-to $Package
 if ($LASTEXITCODE -ne 0) { throw 'CEF archive verification/extraction failed' }
 $CMakeBuild = Join-Path $BuildDirectory 'build'
-& cmake -S (Join-Path $Repo 'apps/windows-client/cef') -B $CMakeBuild -G 'Visual Studio 17 2022' -A x64 "-DCEF_ROOT=$Package" -DUSE_SANDBOX=ON -DBUILD_TESTING=ON
+# Let CMake discover the installed Visual Studio generation, as the root build
+# does. Current hosted Windows images may ship a newer generation than VS2022;
+# hard-coding the VS17 generator fails even when a supported MSVC is installed.
+& cmake -S (Join-Path $Repo 'apps/windows-client/cef') -B $CMakeBuild -A x64 "-DCEF_ROOT=$Package" -DUSE_SANDBOX=ON -DBUILD_TESTING=ON
 if ($LASTEXITCODE -ne 0) { throw 'CEF configure failed' }
 & cmake --build $CMakeBuild --config Release --parallel
 if ($LASTEXITCODE -ne 0) { throw 'CEF Windows compile/link failed' }
