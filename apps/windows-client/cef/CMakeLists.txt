@@ -29,6 +29,10 @@ endif()
 if(NOT CEF_ROOT)
   message(FATAL_ERROR "CEF_ROOT must be the verified pinned minimal windows64 distribution; see docs/cef-build.md")
 endif()
+# Vendor macros re-expand library path arguments. Normalize native Windows
+# separators before FindCEF derives CEF_LIB_*; otherwise D:\\a becomes an invalid
+# CMake escape during ADD_LOGICAL_TARGET's expansion.
+file(TO_CMAKE_PATH "${CEF_ROOT}" CEF_ROOT)
 if(DEFINED USE_SANDBOX AND NOT USE_SANDBOX)
   message(FATAL_ERROR "Chromium sandbox is mandatory")
 endif()
