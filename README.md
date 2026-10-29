@@ -17,11 +17,13 @@ Windows 上的多个独立浏览工作区，分别使用指定 Linux 节点的�
 | 独立路由 | Rust 类型和状态机：用户/沙盒/节点/连接代次绑定，TCP 流与 UDP 关联映射，失效回包拒绝 |
 | TUIC | sing-box 1.14.4 配置生成；真实双节点 TCP/UDP 回环集成测试；尚未接入 Windows 流量捕获 |
 | Linux 文件服务 | FastAPI、PostgreSQL/SQLite、账号和令牌、个人目录、上传/下载/目录/删除 |
-| Windows 网络防护 | WFP 持久阻断基础工具；完整接管驱动、受限身份、DNS 和服务 IPC 未实现 |
-| 完整浏览器 | CEF Views / Chrome-style 组件初始源码，未完成 bootstrap 集成，不参与构建 |
+| Windows 网络防护 | WFP 持久阻断基础工具；新增 SCM Service/受限 IPC 和 DPAPI 原语，尚未接管实际流量 |
+| 完整浏览器 | 固定 CEF 版本与独立 bootstrap/client.dll compile-only 构建链；不是完整浏览器，默认不参与构建 |
+| 客户端登录 | 新增独立 HTTPS 登录诊断组件与管理员保护节点清单；认证后读取真实用户身份，管理窗口集成待完成 |
+| helper 生命周期 | 每沙盒完整绑定的真实子进程启动、stdin 配置、停止/回收；尚未接入受保护服务与 WFP |
 | 浏览器文件桥 | 已确定接口与任务归属规则；尚未接入浏览器文件选择、下载回调 |
 
-当前 UI 输入的用户 UUID 是开发用本机工作区标识，不是服务端登录。节点 API 的真实认证已实现；客户端登录、受信节点清单、凭据保护与个人文件面板仍待接入。
+当前 UI 输入的用户 UUID 仍是开发用本机工作区标识，不是服务端登录。第一阶段新增模块尚未构成完整受保护启动链：独立登录组件不替代 UI 集成，DPAPI 原语不等于持久凭据库，helper 回收不等于 WFP。进度与验收边界见 [分阶段交付](docs/delivery-plan.md)、[登录组件](docs/client-login.md)、[服务基础](apps/windows-service/README.md) 和 [CEF 构建验证](docs/cef-build.md)。
 
 ## 目录
 
@@ -66,7 +68,7 @@ Windows 11 x64 安装 VS2022 C++ 工具、Windows SDK、Rust 和 CMake 后：
 ./artifacts/windows-dev/OrangeSpace.exe
 ```
 
-该构建产物是开发管理器，不含可联网 CEF 浏览器。Windows 实机运行和完整网络验收尚未完成，详见 [Windows 验证](docs/windows-validation.md)。
+该构建产物是开发管理器，不含可联网 CEF 浏览器。Windows 原生模型、登录响应校验、DPAPI/IPC 和 SCM 启停已在 Windows 11 build 26200 执行部分验收；管理窗口交互及完整浏览器/网络验收尚未完成，详见 [Windows 验证](docs/windows-validation.md)。
 
 ## 运行节点与隧道验证
 

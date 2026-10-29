@@ -1,6 +1,7 @@
 #include "host_component.hpp"
 #include "orangespace/model.hpp"
 
+#include "include/cef_request_context_handler.h"
 #include "include/wrapper/cef_helpers.h"
 
 #include <stdexcept>

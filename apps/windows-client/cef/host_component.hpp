@@ -1,7 +1,7 @@
 #pragma once
 
-// This component is source-only until the protected bootstrap integration is
-// complete. It is intentionally absent from the default executable target.
+// Compiled only by the explicit CEF build-validation project. It remains absent
+// from the default executable and cannot be reached from its denying bootstrap.
 #include "include/cef_client.h"
 #include "include/cef_request_context.h"
 #include "include/views/cef_browser_view.h"

@@ -1,4 +1,25 @@
-# 2026-10-29 本机验证记录
+# 验证记录
+
+## 2026-10-29 接手后的第一阶段增量
+
+基线 `38d9739`；以下是 Linux x86-64 与 Windows 11 build 26200 的实际执行，不覆盖后文历史记录。第一阶段仍在进行，尚未开放浏览器。
+
+- Linux：Rust 27 项测试通过（broker 单元 3、CLI 2、core 单元 14、隔离集成 8）；fmt 和 Clippy `-D warnings` 通过。
+- Linux：统一 CMake/CTest 4/4 通过（管理模型、节点会话、CEF 拒绝策略、服务策略）。CEF 包离线测试 4/4 通过。
+- PostgreSQL 17：临时专用测试数据库实际运行，Python 38/38 通过；SQLite 路径 37 通过、1 跳过。第三方 Starlette TestClient 弃用警告仍在。
+- 真实 HTTP：1 MiB 文件、同用户多会话共享、跨用户拒绝、令牌撤销、原子冲突和 Range 通过。
+- sing-box 1.14.4：固定 Linux amd64 包 SHA-256 核对通过，双回环节点 64 次并发 TCP/native UDP 往返、单节点失效隔离、浏览器门禁拒绝通过。不是深圳/广州公网节点或 Windows WFP 验收。
+- Windows 交叉编译：管理器、登录诊断、服务、原生测试和策略测试成功；使用 MinGW 静态编译运行库。WFP 基础工具仍需 Windows SDK，当前 MinGW 缺相关定义。
+- Windows 实机：管理模型、节点会话 100 项校验、CEF 拒绝策略、服务策略通过；Rust core 14、broker 单元 2、隔离集成 8 通过。Windows 少一个 broker 测试是 Unix symlink 测试受平台条件限制，不冒充全部平台覆盖。
+- Windows 实机：以临时 limited interactive-token 计划任务运行 DPAPI roundtrip/tamper/scope、Named Pipe DACL、实际令牌校验、restricted-token 拒绝、超时/取消及浏览器拒绝测试，通过；计划任务清理通过。这不是独立第二个账号验证。
+- Windows 实机：临时服务在全新、管理员保护的 Program Files 子目录中运行，读取 SCM 验证 LocalSystem、精确二进制路径与 PID，启动/停止通过；服务、进程和目录均清理。该桌面会话断开，没有验收已安装服务的 active-WTS 端点或管理窗口。
+- CEF：官方索引匹配固定版本；实际下载 minimal 包 175051364 字节，核对 SHA-1 并新增项目 SHA-256 锁；完整安全解包、真实头文件/layout 校验通过。bootstrap/host 两个源文件的 MinGW 编译探针通过；不是 MSVC 链接、sandbox 启动或可运行浏览器。
+
+**未验证/未完成**：管理窗口登录接入、服务与 broker/helper 串联、持久凭据库、真实 HTTPS 节点登录与 TLS 负例、独立第二账号、active-WTS 多会话、CEF 的 MSVC 链接与 sandbox 子进程、WFP TCP/UDP/受管 DNS/抓包、完整浏览器与文件桥、安装/驱动签名分发。CI 已增加精确 CEF compile-only 检查，执行结果另行核实；不以待执行配置声称通过。
+
+相关复现：`apps/windows-service/README.md`、`docs/client-login.md`、`docs/cef-build.md`、`docs/delivery-plan.md`。
+
+## 2026-10-29 初始 macOS 基线记录（历史）
 
 环境：macOS arm64、Python 3.14.8、Rust 1.97.1、Apple Clang 21、CMake 4.4.4。
 以下记录来自实际执行，不将配置文件或桩返回值视为 Windows 网络隔离证明。

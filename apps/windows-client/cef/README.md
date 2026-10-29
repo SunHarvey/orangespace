@@ -1,27 +1,22 @@
-# CEF 完整浏览器接入边界
+# CEF 精确版本构建验证（不开放浏览器）
 
-`host_component.cc` 是 CEF Views / Chrome-style 宿主组件的初始源码，**未编译验证、未作为默认目标构建、不能启动浏览器**。它展示独立 RequestContext、每进程单沙盒 Profile 和 Chrome-style 窗口的接入位置，不能视为浏览器已交付。
+此目录现在有独立、显式选择的 Windows x64/MSVC **compile-only** 工程。它编译 `host_component.cc` 和 `bootstrap_client_win.cc`，链接 `client.dll`，并将同版本官方 `bootstrap.exe` 原样复制为 `client.exe`。默认管理器构建仍不包含 CEF；此目录不改动父级 `ORANGESPACE_WITH_CEF=OFF` 默认值。
 
-当前 CMake 若收到 `-DORANGESPACE_WITH_CEF=ON` 会明确报错。不要删除门禁以便“先浏览起来”，也不要增加 `--no-sandbox`、`settings.no_sandbox = true` 或允许本机直连的调试入口。
+`cef.lock.json` 固定 CEF **156.0.14+g4fa4ab5+chromium-156.0.8078.48**、Windows API **15600**、发行包校验和及 sandbox compatibility hash。来源、命令与验证范围见 [`docs/cef-build.md`](../../../docs/cef-build.md)。固定版本不代表该二进制已在 Windows 构建或运行通过。
 
-## 固定接入方案
+## 明确不提供的能力
 
-1. 一份共享 CEF 程序文件，多份沙盒 BrowserHost 进程组。每个进程组固定一个用户、沙盒、节点和隧道代次。
-2. CEF 的 `root_cache_path` 固定为该沙盒 `profile`；RequestContext 的 `cache_path` 为其子目录 `Default`。所有新标签、弹窗、扩展页面必须继承此上下文。禁止用户切换/新建 Profile 使窗口绕过绑定。
-3. 一个 Chrome-style CefWindow 只挂载一个 Chrome-style BrowserView。完整标签生命周期、扩展 UI、下载和文件面板共存需要真实 Windows PoC，不能把任意多个原生 BrowserView 当作 Chrome 标签页。
-4. 使用与选定 CEF 版本严格匹配的现代 Windows `bootstrap.exe` / `client.dll` 启动方式，DLL 实现官方 `RunWinMain(..., sandbox_info, version_info)` 接口。先完成版本和 API hash 校验，并保持非空 Chromium `sandbox_info`。此仓库暂不锁定、下载或分发未经构建验证的 CEF 二进制。
-5. **在 CefInitialize 之前**向受保护的 Windows Service 申请进程绑定的启动授权；WFP TCP、UDP、IPv4、IPv6、受管 DNS、进程树身份、驱动签名及失效关闭都就绪后才允许创建 BrowserHost。仅检查代理参数或读取一个 JSON `ready` 值不构成授权。
-6. 浏览器下载由原会话写入隔离临时目录，再提交原节点的文件 API；上传文件选择先读取 Linux 个人文件区，再下载至沙盒临时目录交给原页面。需要保留请求会话、POST/blob 行为和页面对文件的使用期。桥接尚未实现。
+- `RunWinMain(HINSTANCE, LPWSTR, int, void*, cef_version_info_t*)` 使用官方现代 DLL ABI；拒绝空 sandbox 指针、错误结构体大小、版本、提交、sandbox hash 与 API hash。
+- 即使兼容性完全匹配，也无条件拒绝启动。入口**不调用 `CefExecuteProcess`、`CefInitialize` 或消息循环**；没有开关或 JSON ready 值能授权。
+- 构建输出不复制 CEF runtime、资源或 `chrome_elf.dll`，不是可运行/可分发的浏览器目录。不要直接启动它作为测试。
+- 没有完成受保护服务授权、进程身份、WFP TCP/UDP、DNS、驱动签名或子进程 sandbox 实测。非空指针检查不等于 Chromium sandbox 已验收。
 
-## 必须补齐的验证
+## 保留的完整浏览器接入边界
 
-CEF bootstrap/client.dll 的 Windows 构建和 Chromium 子进程 sandbox；Chrome-style 标签与扩展；浏览器直接 TCP/UDP/DNS/IPv6/localhost 逃逸阻断；并发深圳/广州节点与同编号回包隔离；断线、重连、切换时失败关闭；认证下载、blob 下载、文件 input、多文件上传和任务原节点归属。
+1. 共享 CEF 程序文件；每沙盒独立 BrowserHost 进程组，固定用户、沙盒、节点和连接代次。
+2. 未来真正初始化 CEF 时，`root_cache_path` 为本沙盒 `profile`，RequestContext 的 `cache_path` 为其子目录 `Default`。所有标签、弹窗和扩展必须继承同一上下文，不能通过新建 Profile 绕过绑定。
+3. `host_component.cc` 仅是单个 Chrome-style BrowserView/Window 的接入组件，**不是完整多标签 Chrome 浏览器**。完整标签、新窗口、扩展、DevTools、认证、WebRTC 和文件桥仍待实现/实测。
+4. 在任何 `CefInitialize` 以及可能创建网络子进程的路径前，必须取得不可由配置伪造、与进程身份绑定的服务授权。当前代码根本没有初始化调用。
+5. 浏览器文件桥需保留原网页 Cookie、POST/blob 会话与文件使用期，文件任务必须保留创建时节点归属；当前尚未接入。
 
-## 官方参考
-
-- [CEF sandbox setup](https://chromiumembedded.github.io/cef/sandbox_setup)
-- [CEF Windows bootstrap 入口](https://github.com/chromiumembedded/cef/blob/master/include/cef_sandbox_win.h)
-- [CEF Runtime styles 与一个 Chrome-style BrowserView 的限制](https://github.com/chromiumembedded/cef/blob/master/include/internal/cef_types_runtime.h)
-- [CEF Views BrowserView 接口](https://github.com/chromiumembedded/cef/blob/master/include/views/cef_browser_view.h)
-
-本仓库代码独立编写；未复制 IdenGrid 的客户端代码。
+不得加入禁用 Chromium sandbox、关闭证书验证、允许本机直连或跳过服务授权的调试入口。

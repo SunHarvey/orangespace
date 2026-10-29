@@ -1,0 +1,11 @@
+#pragma once
+
+#include <string_view>
+
+namespace orangespace::cef_host::pin {
+inline constexpr std::string_view version = "@PIN_cef_version@";
+inline constexpr std::string_view commit = "@PIN_cef_commit@";
+inline constexpr std::string_view api_hash = "@PIN_api_hash_windows@";
+inline constexpr std::string_view sandbox_hash = "@PIN_sandbox_compat@";
+inline constexpr int api_version = @PIN_api_version@;
+}  // namespace orangespace::cef_host::pin

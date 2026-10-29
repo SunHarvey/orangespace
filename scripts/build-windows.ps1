@@ -14,6 +14,8 @@ try {
     $Output = Join-Path $Repository 'artifacts/windows-dev'
     New-Item -ItemType Directory -Force -Path $Output | Out-Null
     Copy-Item "build/windows/apps/windows-client/$Configuration/OrangeSpace.exe" $Output
+    Copy-Item "build/windows/apps/windows-client/$Configuration/OrangeSpaceLogin.exe" $Output
+    Copy-Item "build/windows/apps/windows-service/$Configuration/OrangeSpaceService.exe" $Output
     Copy-Item 'target/release/orangespace-broker.exe' $Output
     Copy-Item "build/windows/drivers/wfp-baseline/$Configuration/orangespace-wfp-baseline.exe" $Output
     Write-Host "Development manager created at $Output. Browser networking remains blocked."

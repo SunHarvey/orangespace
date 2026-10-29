@@ -44,6 +44,8 @@ jobs:
           python-version: '3.14'
       - run: python -m pip install -r requirements.lock -e '.[test]'
         working-directory: server
+      - name: CEF pinned-package offline validation (not a CEF build)
+        run: python -m unittest discover -s scripts -p test_cef_package.py -v
       - run: python -m pytest
         working-directory: server
         env:
@@ -54,6 +56,25 @@ jobs:
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
+      - name: Rust helper lifecycle tests on Windows (not WFP validation)
+        shell: pwsh
+        run: cargo test -p orangespace-core --locked
       - name: Build native manager and block-only WFP component
         shell: pwsh
         run: ./scripts/build-windows.ps1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Compile pinned CEF bootstrap/client.dll (never launch browser)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$installation) { throw 'MSVC installation not found' }
+          $tools = Get-ChildItem (Join-Path $installation 'VC/Tools/MSVC') -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          $env:PATH = (Join-Path $tools.FullName 'bin/Hostx64/x64') + [IO.Path]::PathSeparator + $env:PATH
+          $lock = Get-Content apps/windows-client/cef/cef.lock.json -Raw | ConvertFrom-Json
+          $archive = Join-Path $env:RUNNER_TEMP $lock.archive
+          Invoke-WebRequest -Uri $lock.archive_url -OutFile $archive
+          ./scripts/cef-build-windows.ps1 -Archive $archive -BuildDirectory (Join-Path $env:RUNNER_TEMP ('orangespace-cef-' + [guid]::NewGuid().ToString('N')))

@@ -1,5 +1,6 @@
 //! Control-plane invariants. This crate does not capture packets or enforce WFP.
 pub mod guard;
+pub mod helper;
 pub mod routing;
 pub mod tunnel;
 
