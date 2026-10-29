@@ -311,6 +311,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "uuid",
+ "windows-sys",
 ]
 
 [[package]]

@@ -2,6 +2,12 @@
 
 当前代码实现的是控制平面的隔离规则及本地元数据管理。**尚未捕获实际 TCP/UDP 数据，也没有完成 Windows WFP/DNS 管控，因此任何 `open` 都失败；不能用它安全上网。**
 
+## helper 生命周期增量
+
+新增真实子进程 supervisor，完整绑定用户／沙盒／节点／代次／隧道；配置仅通过 stdin，退出和回收不自动重连或回退。Windows 每 Binding 独立、不可继承的单进程 kill-on-close Job 已通过原生普通／breakaway 创建拒绝、唯一 assignment 和监督进程无 Drop 异常退出回收测试；这不限制浏览器多进程，真实 Windows sing-box 的认证、A/B 独立停止及无 Drop 异常退出回收也已实机通过。受保护安装前提、spawn/assignment 非原子窗口、真实执行范围与未完成项见 [helper 说明](../docs/helper-lifecycle.md)。
+
+此模块尚未串入服务的认证授权与路由失效链，不能据此放开浏览器。仓库最低 Rust 为 **1.89**，保留现有依赖锁。
+
 ## 本地试运行
 
 ```sh

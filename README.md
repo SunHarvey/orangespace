@@ -41,7 +41,7 @@ docs/                       架构、当前验证记录和 Windows 验收条件
 
 ## 本机开发验证
 
-Rust stable（本次验证版本 1.97.1）、Python 3.12+、CMake 3.24+、C++20 编译器：
+Rust stable（最低 **1.89**；现有锁定依赖不支持 1.85）、Python 3.12+、CMake 3.24+、C++20 编译器：
 
 ```sh
 cargo test --workspace --locked

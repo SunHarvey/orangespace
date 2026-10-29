@@ -10,10 +10,22 @@
 //!
 //! Children receive only fixed public arguments and piped JSON stdin; both
 //! output streams are discarded. No credentials are written to files or env.
-//! The executable must remain in the foreground and must not delegate stdin or
-//! daemonize. This supervises only the immediate Child: no Windows Job/restricted
-//! identity, descendant containment, WFP, DNS containment or browser permit is
-//! implemented. The existing browser gate is deliberately independent.
+//! The executable must remain in the foreground, must not delegate stdin or
+//! daemonize, and must not process network configuration until stdin is delivered.
+//! Windows assigns each helper to a fresh unnamed, non-inheritable kill-on-close
+//! Job with an active-process limit of one before delivering stdin. Only this
+//! trusted foreground helper's ordinary child creation is denied, not browser
+//! multiprocess operation or arbitrary brokered/delegated process creation.
+//! This narrowly relies on the protected installed sing-box stdin contract:
+//! spawn and Job assignment are NOT an atomic suspended or restricted-identity
+//! launch. A crash in that pre-assignment window is not covered. Linux supervises
+//! only the immediate Child. Neither route implements restricted browser
+//! identity, WFP, DNS containment or a browser permit.
+//! Windows retains the actual root identity and permits only one successful
+//! assignment per Job, even after root exit. Stop/poll waits for that process
+//! object's signal, without PID snapshots or finite history-counter inference.
+//! This is a trusted-helper policy, not an untrusted-code security boundary.
+//! The existing browser gate is deliberately independent.
 //! Timeouts bound pipe-delivery/stop waiting, not OS spawn latency or scheduling.
 //! Drop kills all children, polls within one shared timeout, then transfers any
 //! uninterruptible children to background waiters for eventual reaping.
@@ -74,13 +86,54 @@ pub struct HelperExit {
     pub pid: u32,
     pub status: ExitStatus,
 }
+struct OwnedHelper {
+    child: Child,
+    #[cfg(windows)]
+    job: helper_job_win::Job,
+}
+impl std::ops::Deref for OwnedHelper {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.child
+    }
+}
+impl std::ops::DerefMut for OwnedHelper {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.child
+    }
+}
+impl OwnedHelper {
+    fn kill(&mut self) -> io::Result<()> {
+        #[cfg(windows)]
+        let job_result = self.job.terminate();
+        let child_result = self.child.kill();
+        #[cfg(windows)]
+        return job_result.and(child_result);
+        #[cfg(not(windows))]
+        child_result
+    }
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        let status = self.child.try_wait()?;
+        #[cfg(windows)]
+        if status.is_some() {
+            // Child's exit status and the separately retained actual root
+            // handle must both report exit before removing this binding.
+            self.job.terminate()?;
+            if !self.job.root_exited()? {
+                return Ok(None);
+            }
+        }
+        Ok(status)
+    }
+}
+
 /// Exclusive lifecycle owner. Active sandbox identities cannot be overwritten;
 /// close/reap is required before a strictly newer generation with a fresh tunnel
 /// ID can start. Sandbox ownership is retained after close for this lifetime.
 pub struct HelperSupervisor {
     executable: TrustedExecutable,
     timeout: Duration,
-    active: HashMap<Binding, Child>,
+    active: HashMap<Binding, OwnedHelper>,
     history: HashMap<SandboxId, (UserId, u64)>,
     tunnels: HashSet<TunnelId>,
 }
@@ -148,7 +201,24 @@ impl HelperSupervisor {
         // potentially attacker-controlled inherited value; query Windows.
         #[cfg(windows)]
         command.env("SystemRoot", windows_system_root()?);
-        let mut child = command.spawn()?;
+        #[cfg(windows)]
+        let mut job = helper_job_win::Job::new()?;
+        let child = command.spawn()?;
+        #[cfg(windows)]
+        let assignment = job.assign(&child);
+        let mut child = OwnedHelper {
+            child,
+            #[cfg(windows)]
+            job,
+        };
+        #[cfg(windows)]
+        if let Err(error) = assignment {
+            // Own the failed child before cleanup; no config writer or secret
+            // delivery exists yet. Keep ownership on a stop timeout/error.
+            self.active.insert(binding, child);
+            let _ = self.close(binding);
+            return Err(io::Error::new(error.kind(), "helper job assignment failed"));
+        }
         let mut stdin = child.stdin.take().unwrap();
         let pid = child.id();
         self.active.insert(binding, child);
@@ -290,13 +360,17 @@ impl Drop for HelperSupervisor {
     }
 }
 
+#[cfg(windows)]
+#[path = "helper_job_win.rs"]
+mod helper_job_win;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{NodeId, SandboxId, TunnelId, UserId};
     use std::io::Read;
 
-    fn binding() -> Binding {
+    pub(super) fn binding() -> Binding {
         Binding {
             user_id: UserId::new(),
             sandbox_id: SandboxId::new(),
@@ -306,7 +380,7 @@ mod tests {
         }
     }
 
-    fn settings(b: Binding, mode: &str) -> TunnelSettings {
+    pub(super) fn settings(b: Binding, mode: &str) -> TunnelSettings {
         serde_json::from_value(serde_json::json!({
             "node_id": b.node_id, "endpoint_ip": "127.0.0.1", "endpoint_port": 443,
             "tls_server_name": "helper.example.test", "tuic_uuid": uuid::Uuid::new_v4(),

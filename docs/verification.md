@@ -21,6 +21,13 @@
 
 - 最新 UI/IPC 增量：统一 CMake/CTest 6/6 通过；Windows 实机通过工作区认证控制器、服务缺失/会话 0 的 IPC 负例、节点会话 100 项校验。IPC 负例不是已安装服务握手验收。13 项 Python 脚本／依赖闭包测试通过；TLS fixture 的独立超时清理、上传顺序和成功输出时机已补回归，并在真实 Windows 重跑成功。
 
+- 已安装服务 IPC 初轮（其整表重建 DACL 策略被复核阻断，后续修正见下）：在原有 Disconnected 会话 2，以真实非提权客户端完成 LocalSystem SCM + 实际 pipe PID + `locked_foundation` + ACK 握手；停止服务时旧 read 失败、旧连接失效，重启后新握手成功。不改变 RDP 状态。为保留服务进程句柄而增加的最小观察权限仍需独立审查；这不是凭据 IPC。父流程核对两份二进制 SHA-256、重新构建并通过 CTest 6/6，另行读回服务、任务、进程、精确 Program Files 测试目录和上传目录均不存在。详见 `docs/service-ipc-validation.md`。
+
+- DACL 修正版（二次独立复核通过，已独立提交并推送 `56a0edf`，GitHub SunHarvey／Verified 已核验；该 SHA 的 Linux、PostgreSQL、Windows 三项 CI 全部成功）：保存不可变基线，保持原 ACE 字节／顺序及拒绝语义，仅追加或撤销服务管理的观察授权；不再合成 SYSTEM／Administrators 全权规则。原生 AccessCheck 记录覆盖基线／继承拒绝、同 SID 原有权利、重复 SID、增撤、幂等和外部漂移拒绝；已安装服务握手与重启记录通过。父流程核对三份二进制及脚本 SHA-256，重新构建 Linux CTest 6/6 通过。修正版日志记录了成功运行的精确服务／任务／进程／目录／上传清理；额外 SCM 历史查询审批受阻未执行，未重试或绕过，不将其计为验收证据。特权并发写不存在原子比较交换、已打开句柄不可撤销等限制见 `docs/service-ipc-validation.md`。
+
+- Windows helper 单进程实现已完成，父流程在真实 Windows 重跑 core 28/28、isolation 8/8 通过；普通创建及 breakaway 均被拒绝，唯一 assignment guard、无 Drop 异常退出及失败前 stdin 零字节通过。独立生产复核通过；真实 Windows sing-box A/B 认证与独立关闭通过，无 Drop 的 supervisor 退出回收连续 3 次通过，外层独立失败清理回归也通过。完整 workspace／fmt／Linux 与 Windows all-target Clippy、Linux 真实 helper 及 64 次 TCP/native UDP 回环烟测再次通过；runtime 夹具、最后测试修正和 CI 增量均已独立复核通过，浏览器多进程架构不变。以下是已废止旧方案的历史验证，不能视为新策略验收：每 Binding 独立不可继承的 kill-on-close Job，真实 Windows 验证普通关闭、无 Drop 的异常退出、后代回收及 A/B 独立。初轮 core 23 通过后，复核仍发现 PID 复用和停止快照竞态；修正版增加实际归属校验、零准入屏障和生命周期句柄覆盖。父流程使用 Rust 1.89.0 和当前依赖锁（未降级 uuid）实际重跑 Windows core 27、runtime 辅助 2、隔离模型 8 均通过，并修正未知历史后代测试的前置条件竞态后连续重跑该用例 20 次通过。无法捕获已消失的历史后代时可能永久保留绑定，属于明确的保守可用性损失；Job 仍不等于 WFP、受限浏览器身份或所有竞态已排除。详见 `docs/helper-lifecycle.md`。
+- 最低版本修正：真实复现 Rust 1.85 `--locked` 因 uuid 1.29.0 需要 1.89 而失败，改为最低 1.89，不更改已锁定 uuid；Rust 1.89 workspace 测试／fmt／Clippy 实际通过。`31bbccc` 的 Linux、PostgreSQL、Windows CI 已全部通过；后续 Job/MSRV 增量需核对其自己的 CI。
+
 **未验证/未完成**：管理窗口成功登录和交互验收、服务与 broker/helper 串联、持久凭据库、成功的真实 HTTPS 节点登录及其余 TLS/重定向负例、独立第二账号、active-WTS 多会话、CEF sandbox 子进程、WFP TCP/UDP/受管 DNS/抓包、完整浏览器与文件桥、安装/驱动签名分发。
 
 相关复现：`apps/windows-service/README.md`、`docs/client-login.md`、`docs/cef-build.md`、`docs/delivery-plan.md`。

@@ -13,6 +13,10 @@ jobs:
           cargo test --workspace --locked
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo build --workspace --locked
+      - name: Verify minimum Rust with the committed lockfile
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal
+          cargo +1.89.0 test --workspace --locked
       - name: Native model checks
         run: |
           cmake -S . -B build
@@ -60,6 +64,29 @@ jobs:
       - name: Rust helper lifecycle tests on Windows (not WFP validation)
         shell: pwsh
         run: cargo test -p orangespace-core --locked
+      - name: Real Windows sing-box helper lifecycle (not WFP validation)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $fixture = Join-Path $env:RUNNER_TEMP ('os-singbox-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $fixture | Out-Null
+          try {
+            $archive = Join-Path $fixture 'runtime.zip'
+            Invoke-WebRequest -Uri 'https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip' -OutFile $archive
+            if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne '99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df') { throw 'Runtime archive hash mismatch' }
+            Expand-Archive -LiteralPath $archive -DestinationPath $fixture
+            $env:ORANGESPACE_TEST_SING_BOX = Join-Path $fixture 'sing-box-1.14.4-windows-amd64/sing-box.exe'
+            if ((Get-FileHash -LiteralPath $env:ORANGESPACE_TEST_SING_BOX -Algorithm SHA256).Hash -ne '8f30682ee198855440d2a7fe070d5d3653793b2d01bb8c85eea88f93bbe7c8b9') { throw 'Runtime executable hash mismatch' }
+            $cases = cargo test -p orangespace-core --locked --test helper_runtime -- --list
+            if ($LASTEXITCODE -ne 0 -or !($cases -contains 'real_sing_box_stdin_authentication_and_independent_lifecycle: test') -or !($cases -contains 'windows_crash::real_sing_box_dies_after_abrupt_supervisor_exit: test')) { throw 'Required real-runtime tests are missing' }
+            cargo test -p orangespace-core --locked --test helper_runtime -- --exact real_sing_box_stdin_authentication_and_independent_lifecycle --ignored --nocapture --test-threads=1
+            if ($LASTEXITCODE -ne 0) { throw 'Real helper authentication/lifecycle test failed' }
+            cargo test -p orangespace-core --locked --test helper_runtime -- --exact windows_crash::real_sing_box_dies_after_abrupt_supervisor_exit --ignored --nocapture --test-threads=1
+            if ($LASTEXITCODE -ne 0) { throw 'Real helper supervisor-crash test failed' }
+          } finally {
+            Remove-Item Env:ORANGESPACE_TEST_SING_BOX -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $fixture) { Remove-Item -LiteralPath $fixture -Recurse -Force }
+          }
       - name: Build native manager and block-only WFP component
         shell: pwsh
         run: ./scripts/build-windows.ps1
