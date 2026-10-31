@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 import json
 import re
+import time
 from typing import Annotated
 from urllib.parse import quote
 
@@ -12,9 +13,10 @@ from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from . import __version__
-from .auth import Identity, LoginLimiter, authenticate, login, revoke
+from .auth import Identity, LoginLimiter, authenticate, login
 from .config import Settings
 from .database import Database
+from .tunnels import EmptyBody, TunnelBody, TunnelManager, canonical_uuid
 from .storage import FileReader, PersonalStorage, StorageError
 
 
@@ -43,6 +45,17 @@ class DownloadResponse(StreamingResponse):
                 await run_in_threadpool(self.reader.close)
 
 
+def unique_json(body):
+    def members(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON member")
+            result[key] = value
+        return result
+    return json.loads(body, object_pairs_hook=members)
+
+
 async def small_json(request: Request, schema):
     body = bytearray()
     async for chunk in request.stream():
@@ -50,7 +63,7 @@ async def small_json(request: Request, schema):
             raise HTTPException(413, "request body too large")
         body.extend(chunk)
     try:
-        return schema.model_validate(json.loads(body))
+        return schema.model_validate(unique_json(body))
     except (ValueError, ValidationError):
         # Do not echo invalid input: login bodies contain passwords.
         raise HTTPException(422, "invalid JSON request") from None
@@ -59,6 +72,20 @@ async def small_json(request: Request, schema):
 def identity(request: Request) -> Identity:
     authorization = request.headers.get("authorization", "")
     scheme, _, token = authorization.partition(" ")
+    fed = request.app.state.federation
+    if fed is not None:
+        # Authorization is bound to the server-matched endpoint, never the URL
+        # (which includes deployment mount prefixes). Unknown routes fail closed.
+        route = request.scope.get('route')
+        endpoint = getattr(route, 'endpoint', None)
+        policy = request.app.state.federation_policies.get((endpoint, request.method))
+        if policy is None:
+            raise HTTPException(403, 'federated authorization policy unavailable')
+        if policy == 'lease-permit':
+            request.state.permit_budget = request.scope['orangespace.operation_deadline']
+            return fed.authenticate(token if scheme.lower() == 'bearer' else '', 'tunnel')
+        scope = None if policy == 'identity' else policy
+        return fed.authenticate(token if scheme.lower() == 'bearer' else '', scope)
     current = authenticate(request.app.state.database, token) if scheme.lower() == "bearer" else None
     if current is None:
         raise HTTPException(401, "authentication required", headers={"WWW-Authenticate": "Bearer"})
@@ -86,23 +113,31 @@ def byte_range(value: str | None, size: int) -> tuple[int, int, int]:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     config = settings or Settings.from_env()
+    from .federation import Federation, ExchangeBody, load_config
+    federation_config = load_config(config.federation_config, config.node_id) if config.federation_config is not None else None
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         database = Database(config.database_url)
         storage = None
+        tunnels = None
         try:
             # CLI init-db is recommended for deployment; this is idempotent for
             # the initial schema and convenient for local development.
             await run_in_threadpool(database.initialize)
             storage = await run_in_threadpool(PersonalStorage, config.data_root)
+            tunnels = await run_in_threadpool(TunnelManager, database, config)
+            app.state.tunnels = tunnels
             app.state.database = database
+            app.state.federation = Federation(federation_config, database) if federation_config is not None else None
             app.state.storage = storage
             app.state.login_limiter = LoginLimiter(config.login_attempts, config.login_window_seconds)
             app.state.password_limiter = anyio.CapacityLimiter(4)
             app.state.upload_limiter = anyio.CapacityLimiter(8)
             yield
         finally:
+            if tunnels:
+                await run_in_threadpool(tunnels.close)
             if storage:
                 storage.close()
             database.close()
@@ -112,6 +147,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def response_headers(request: Request, call_next):
+        request.scope['orangespace.operation_deadline'] = time.monotonic() + 30
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -126,8 +162,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health():
         return {"status": "ok", "version": __version__}
 
+    @app.post('/federation/v1/sessions/exchange')
+    async def exchange(request: Request):
+        if app.state.federation is None:
+            raise HTTPException(404, 'federation unavailable')
+        body = await small_json(request, ExchangeBody)
+        return await run_in_threadpool(app.state.federation.exchange, body)
+
+    @app.post('/federation/v1/sessions/exchange-cleanup')
+    async def exchange_cleanup(request: Request):
+        if app.state.federation is None:
+            raise HTTPException(404, 'federation unavailable')
+        body = await small_json(request, ExchangeBody)
+        return await run_in_threadpool(app.state.federation.cleanup, body)
+
     @app.post("/v1/auth/login")
     async def sign_in(request: Request):
+        if app.state.federation is not None:
+            raise HTTPException(403, 'local password login disabled')
         body = await small_json(request, LoginBody)
         peer = request.client.host if request.client else "unknown"
         limiter = app.state.login_limiter
@@ -149,8 +201,71 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/v1/auth/logout", status_code=204)
     def sign_out(current: Annotated[Identity, Depends(identity)]):
-        revoke(app.state.database, current.token_digest)
+        app.state.tunnels.logout(current)
         return Response(status_code=204)
+
+    @app.get("/v1/session")
+    def session_info(current: Annotated[Identity, Depends(identity)]):
+        return {"user_id": current.user_id, "username": current.username, "node_id": str(config.node_id),
+                "expires_at": current.expires_at}
+
+    @app.post("/v1/tunnels")
+    async def create_tunnel(request: Request, current: Annotated[Identity, Depends(identity)]):
+        require_lease_schema(request)
+        body = await small_json(request, TunnelBody)
+        if app.state.federation is not None:
+            deadline = await run_in_threadpool(app.state.federation.permit, current, body, 'create', request.state.permit_budget)
+            reply = await run_in_threadpool(app.state.tunnels.create, current, body, deadline)
+            return await run_in_threadpool(app.state.tunnels.permit_reply, current, reply, deadline)
+        return await run_in_threadpool(app.state.tunnels.create, current, body)
+
+    def require_lease_schema(request):
+        if request.headers.getlist("x-orangespace-lease-schema") != ["2"]:
+            raise HTTPException(426, "lease schema 2 required")
+
+    def tunnel_identifier(value):
+        try:
+            return canonical_uuid(value)
+        except ValueError:
+            raise HTTPException(422, "invalid tunnel ID") from None
+
+    @app.post("/v1/tunnels/{tunnel_id}/renew")
+    async def renew_tunnel(tunnel_id: str, request: Request, current: Annotated[Identity, Depends(identity)]):
+        require_lease_schema(request)
+        # Bounded empty-body parser: absent bytes or exactly an empty JSON object.
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 16 * 1024:
+                raise HTTPException(413, "request body too large")
+            body.extend(chunk)
+        if body:
+            try:
+                EmptyBody.model_validate(unique_json(body))
+            except (ValueError, ValidationError):
+                raise HTTPException(422, "invalid JSON request") from None
+        tid = tunnel_identifier(tunnel_id)
+        if app.state.federation is not None:
+            binding, snapshot = await run_in_threadpool(app.state.tunnels.renewal_snapshot, current, tid)
+            deadline = await run_in_threadpool(app.state.federation.permit, current, binding, 'renew', request.state.permit_budget)
+            reply = await run_in_threadpool(app.state.tunnels.renew, current, tid, deadline, snapshot)
+            return await run_in_threadpool(app.state.tunnels.permit_reply, current, reply, deadline)
+        return await run_in_threadpool(app.state.tunnels.renew, current, tid)
+
+    @app.delete("/v1/tunnels/{tunnel_id}", status_code=204)
+    def delete_tunnel(tunnel_id: str, current: Annotated[Identity, Depends(identity)]):
+        app.state.tunnels.delete(current, tunnel_identifier(tunnel_id))
+        return Response(status_code=204)
+
+    @app.post("/v1/tunnels/{tunnel_id}/probe")
+    def tunnel_probe(tunnel_id: str, request: Request):
+        runtime = app.state.tunnels.config
+        local = tuple(request.scope.get("server") or ())
+        proxy_headers = any(name == "forwarded" or name == "x-real-ip" or name.startswith("x-forwarded-") for name in request.headers)
+        if runtime is None or not request.client or request.client.host != "127.0.0.1" or local != ("127.0.0.1", runtime.probe_port) or proxy_headers:
+            raise HTTPException(404, "tunnel not found")
+        if request.headers.get("authorization"):
+            raise HTTPException(400, "probe uses separate authorization")
+        return app.state.tunnels.probe(tunnel_identifier(tunnel_id), request.headers.get("x-orangespace-probe"))
 
     @app.get("/v1/me")
     def me(current: Annotated[Identity, Depends(identity)]):
@@ -231,4 +346,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.storage.delete(current.user_id, path)
         return Response(status_code=204)
 
+    app.state.federation_policies = {
+        (sign_out, 'POST'): 'identity',
+        (session_info, 'GET'): 'identity',
+        (me, 'GET'): 'identity',
+        (create_tunnel, 'POST'): 'lease-permit',
+        (renew_tunnel, 'POST'): 'lease-permit',
+        (delete_tunnel, 'DELETE'): 'identity',
+        (list_files, 'GET'): 'files.read',
+        (download_file, 'GET'): 'files.read',
+        (create_directory, 'POST'): 'files.write',
+        (upload_file, 'PUT'): 'files.write',
+        (delete_file, 'DELETE'): 'files.write',
+    }
     return app

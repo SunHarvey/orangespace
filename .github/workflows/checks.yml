@@ -29,19 +29,9 @@ jobs:
           tar -xzf /tmp/sing-box.tar.gz -C /tmp
           python3 scripts/smoke_tuic.py --sing-box /tmp/sing-box-1.14.4-linux-amd64/sing-box
           ORANGESPACE_TEST_SING_BOX=/tmp/sing-box-1.14.4-linux-amd64/sing-box cargo test -p orangespace-core --locked --test helper_runtime -- --ignored
-  node:
+  node-mysql:
     runs-on: ubuntu-24.04
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_DB: orangespace_test
-          POSTGRES_USER: orangespace_test
-          POSTGRES_PASSWORD: ci-only-not-a-deployment-secret
-        ports: ['5432:5432']
-        options: >-
-          --health-cmd "pg_isready -U orangespace_test -d orangespace_test"
-          --health-interval 5s --health-timeout 5s --health-retries 10
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -51,12 +41,153 @@ jobs:
         working-directory: server
       - name: Dependency lock and offline fixture validation (not browser validation)
         run: python -m unittest discover -s scripts -p 'test_*.py' -v
-      - run: python -m pytest
+      - name: Real MySQL and all real runtime tests (not deployment or Windows acceptance)
         working-directory: server
-        env:
-          ORANGESPACE_TEST_POSTGRES_URL: postgresql+psycopg://orangespace_test:ci-only-not-a-deployment-secret@127.0.0.1:5432/orangespace_test
-      - name: Real HTTP file lifecycle
-        run: python scripts/smoke_node.py
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          PYTHON="$(command -v python)"
+          sudo -- "$PYTHON" - "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" <<'PY'
+          import hashlib, io, json, os, re, resource, shutil, stat, subprocess, sys, tarfile, time, urllib.request
+          from pathlib import Path
+          from sqlalchemy.engine import URL
+          import xml.etree.ElementTree as ET
+          resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+          assert os.geteuid() == 0 and resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
+          run, attempt = sys.argv[1:3]
+          assert re.fullmatch(r'[1-9][0-9]{0,19}', run) and re.fullmatch(r'[1-9][0-9]{0,9}', attempt)
+          root = Path('/var/lib') / ('orangespace-ci-' + run + '-' + attempt)
+          marker = 'orangespace-node-mysql:' + run + ':' + attempt
+          os.umask(0o077)
+          root.mkdir(mode=0o700)  # CreateNew: never adopt an existing directory.
+          with (root / 'owner').open('x') as stream:
+              stream.write(marker)
+          name = 'orangespace-mysql-' + run + '-' + attempt
+          container = None
+          try:
+              for leaf in ('socket', 'tmp', 'runtime'):
+                  (root / leaf).mkdir(mode=0o700)
+              # Public disposable fixture password only; never substitute production credentials.
+              result = subprocess.run(['docker', 'run', '--detach', '--name', name,
+                  '--label', 'orangespace.ci.owner=' + marker,
+                  '--env', 'MYSQL_ROOT_PASSWORD=ci-disposable-only',
+                  '--env', 'MYSQL_DATABASE=orangespace_node_test',
+                  '--mount', 'type=bind,src=' + str(root / 'socket') + ',dst=/var/run/mysqld',
+                  'mysql:8.4.13', '--skip-networking'], check=True, capture_output=True, text=True)
+              container = result.stdout.strip()
+              assert re.fullmatch('[0-9a-f]{64}', container)
+              for _ in range(120):
+                  ready = subprocess.run(['docker', 'exec', '--env', 'MYSQL_PWD=ci-disposable-only',
+                      container, 'mysql', '--protocol=socket', '--user=root',
+                      '--database=orangespace_node_test', '--batch', '--skip-column-names',
+                      '--execute=SELECT VERSION()'], capture_output=True, text=True)
+                  if ready.returncode == 0 and ready.stdout.strip().startswith('8.4.13'):
+                      break
+                  time.sleep(2)
+              else:
+                  raise RuntimeError('disposable MySQL readiness failed')
+              url = URL.create('mysql+pymysql', username='root', password='ci-disposable-only',
+                  host='localhost', database='orangespace_node_test',
+                  query={'unix_socket': str(root / 'socket' / 'mysqld.sock'), 'charset': 'utf8mb4'})
+              for leaf, extra in [('node.json', {}), ('control.json', {'session_ttl_seconds': 3600})]:
+                  with (root / leaf).open('x') as stream:
+                      json.dump({'database_url': url.render_as_string(hide_password=False), **extra}, stream)
+              archive_url = 'https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64.tar.gz'
+              with urllib.request.urlopen(archive_url, timeout=60) as response:
+                  archive = response.read(100 * 1024 * 1024 + 1)
+              assert len(archive) <= 100 * 1024 * 1024
+              assert hashlib.sha256(archive).hexdigest() == '699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968'
+              with tarfile.open(fileobj=io.BytesIO(archive), mode='r:gz') as tar:
+                  members = [m for m in tar.getmembers() if Path(m.name).name == 'sing-box']
+                  assert len(members) == 1
+                  member = members[0]
+                  assert member.name == 'sing-box-1.14.4-linux-amd64/sing-box'
+                  assert member.isfile() and 0 < member.size <= 100 * 1024 * 1024
+                  with tar.extractfile(member) as stream:
+                      binary = stream.read(100 * 1024 * 1024 + 1)
+              assert len(binary) == member.size and binary.startswith(b'\x7fELF')
+              assert hashlib.sha256(binary).hexdigest() == '1264361b5f8868c8768f7555d3e77e20118bf503c41ac08bb290a0d99056aa3a'
+              executable = root / 'runtime' / 'sing-box'
+              with executable.open('xb') as stream:
+                  stream.write(binary)
+              executable.chmod(0o700)  # Only verified bytes become executable.
+              env = dict(os.environ, ORANGESPACE_TEST_MYSQL_CONFIG=str(root / 'node.json'),
+                  ORANGESPACE_CONTROL_TEST_CONFIG=str(root / 'control.json'),
+                  ORANGESPACE_TEST_SING_BOX=str(executable), TMPDIR=str(root / 'tmp'),
+                  PYTHONDONTWRITEBYTECODE='1')
+              report = root / 'results.xml'
+              tested = subprocess.run([sys.executable, '-m', 'pytest', '-q', '--assert=plain', '--tb=short',
+                  '--basetemp=' + str(root / 'tmp' / 'pytest'), '--junitxml=' + str(report)], env=env)
+              suites = ET.parse(report).getroot()
+              cases = list(suites.iter('testcase'))
+              assert cases and not list(suites.iter('skipped')) and not list(suites.iter('error'))
+              assert not list(suites.iter('failure')) and tested.returncode == 0
+          finally:
+              # Remove only the exact container ID with our label; never use a guessed name.
+              if container is not None:
+                  label = subprocess.check_output(['docker', 'inspect', '--format',
+                      '{{ index .Config.Labels "orangespace.ci.owner" }}', container], text=True).strip()
+                  assert label == marker
+                  subprocess.run(['docker', 'rm', '--force', container], check=True, stdout=subprocess.DEVNULL)
+              info = root.lstat()
+              owned = stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o700
+              proof = root / 'owner'
+              pi = proof.lstat()
+              owned = owned and stat.S_ISREG(pi.st_mode) and pi.st_uid == 0 and pi.st_nlink == 1 and stat.S_IMODE(pi.st_mode) == 0o600
+              if owned and proof.read_text() == marker:
+                  shutil.rmtree(root)
+              else:
+                  raise RuntimeError('unknown fixture ownership; preserved')
+          PY
+      - name: Always clean only proven owned disposable fixtures
+        if: always()
+        run: |
+          set -euo pipefail
+          PYTHON="$(command -v python)"
+          sudo -- "$PYTHON" - "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" <<'PY'
+          import json, os, re, resource, shutil, stat, subprocess, sys
+          from pathlib import Path
+          resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+          run, attempt = sys.argv[1:3]
+          assert re.fullmatch(r'[1-9][0-9]{0,19}', run) and re.fullmatch(r'[1-9][0-9]{0,9}', attempt)
+          root = Path('/var/lib') / ('orangespace-ci-' + run + '-' + attempt)
+          marker = 'orangespace-node-mysql:' + run + ':' + attempt
+          if not root.exists() and not root.is_symlink():
+              sys.exit(0)
+          ri = root.lstat()
+          assert stat.S_ISDIR(ri.st_mode) and ri.st_uid == 0 and stat.S_IMODE(ri.st_mode) == 0o700, 'unknown directory preserved'
+          proof = root / 'owner'
+          pi = proof.lstat()
+          assert stat.S_ISREG(pi.st_mode) and pi.st_uid == 0 and pi.st_nlink == 1 and stat.S_IMODE(pi.st_mode) == 0o600, 'unknown marker preserved'
+          assert proof.read_text() == marker, 'unknown marker preserved'
+          name = 'orangespace-mysql-' + run + '-' + attempt
+          inspected = subprocess.run(['docker', 'inspect', name], capture_output=True, text=True)
+          if inspected.returncode == 0:
+              item, = json.loads(inspected.stdout)
+              assert item['Config']['Labels'].get('orangespace.ci.owner') == marker, 'unknown container preserved'
+              subprocess.run(['docker', 'rm', '--force', item['Id']], check=True, stdout=subprocess.DEVNULL)
+          else:
+              # A daemon error is not proof that the container is absent.
+              known = subprocess.check_output(['docker', 'ps', '-a', '--format', '{{.Names}}'], text=True).splitlines()
+              assert name not in known, 'container state unknown; directory preserved'
+          shutil.rmtree(root)
+          PY
+  control-console:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/control-console/package-lock.json
+      - name: Vue typecheck, unit tests and production build (not browser E2E)
+        working-directory: apps/control-console
+        run: |
+          npm ci
+          npm run typecheck
+          npm test -- --maxWorkers=1
+          npm run build
   windows-manager:
     runs-on: windows-2025
     steps:

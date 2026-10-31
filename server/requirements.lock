@@ -1,4 +1,4 @@
-# Tested dependency set (Python 3.14 / macOS); use these versions in Linux CI too.
+# Runtime/test pins: Linux Python 3.13 acceptance; MySQL 8.4 is the sole server database.
 # Install with: python -m pip install -r requirements.lock -e '.[test]'
 annotated-doc==0.0.5
 annotated-types==0.8.0
@@ -8,6 +8,7 @@ argon2-cffi-bindings==26.1.0
 certifi==2026.10.23
 cffi==2.1.1
 click==8.5.0
+cryptography==50.0.2
 fastapi==0.162.0
 # Match SQLAlchemy's platform-conditional mandatory dependency.
 greenlet==3.5.6; platform_machine == "aarch64" or platform_machine == "ppc64le" or platform_machine == "x86_64" or platform_machine == "amd64" or platform_machine == "AMD64" or platform_machine == "win32" or platform_machine == "WIN32"
@@ -19,13 +20,15 @@ iniconfig==2.3.1
 opentelemetry-api==1.45.1
 packaging==26.3
 pluggy==1.7.0
-psycopg==3.3.6
-psycopg-binary==3.3.6
 pycparser==3.12
 pydantic==2.14.1
 pydantic_core==2.50.1
 Pygments==2.21.0
 pytest==9.2.0
+alembic==1.20.1
+Mako==1.4.3
+MarkupSafe==3.0.4
+PyMySQL==1.2.3
 SQLAlchemy==2.0.55
 starlette==1.10.0
 typing-inspection==0.4.4

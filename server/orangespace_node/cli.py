@@ -1,28 +1,60 @@
 import argparse
+import asyncio
 import getpass
+import json
 import sys
 import time
 
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
-from .auth import PASSWORDS, create_user, normalize_username
+from .auth import PASSWORDS, create_user, normalize_username, set_tunnel_grant
 from .config import Settings
 from .database import AccessSession, Database, User
 from .storage import PersonalStorage
+
+
+def _publish_identity_evidence(args: argparse.Namespace) -> None:
+    try:
+        settings = Settings.from_env()
+        db = Database(settings.database_url)
+        try:
+            db.initialize()
+            from .control_identity import load_machine_config, submit_inventory
+
+            machine = load_machine_config(args.machine_config)
+            if machine["node_id"] != str(settings.node_id):
+                raise ValueError("machine configuration belongs to another node")
+            result = asyncio.run(submit_inventory(db.engine, machine, args.legacy_user_id, args.request_id))
+            public = {key: result[key] for key in ("schema", "evidence_digest", "expires_at")}
+            output = json.dumps(public, separators=(",", ":"))
+        finally:
+            db.close()
+        print(output)
+    except Exception:
+        # Cover startup and shutdown too; never relay configuration/SQL secrets.
+        print("Identity inventory submission failed.", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="OrangeSpace node administration; passwords are read privately")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init-db")
-    for command in ("create-user", "disable-user", "enable-user", "set-password", "revoke-sessions"):
+    for command in ("create-user", "disable-user", "enable-user", "set-password", "revoke-sessions", "enable-tunnel", "disable-tunnel"):
         child = sub.add_parser(command)
         child.add_argument("username")
     sub.add_parser("list-users")
     cleanup = sub.add_parser("cleanup-uploads")
     cleanup.add_argument("--older-than-hours", type=int, default=24)
+    inventory = sub.add_parser("publish-identity-evidence")
+    inventory.add_argument("--machine-config", required=True)
+    inventory.add_argument("--legacy-user-id", required=True)
+    inventory.add_argument("--request-id", required=True)
     args = parser.parse_args()
+    if args.command == "publish-identity-evidence":
+        _publish_identity_evidence(args)
+        return
     settings = Settings.from_env()
     db = Database(settings.database_url)
     try:
@@ -44,6 +76,9 @@ def main() -> None:
                 parser.error("passwords do not match")
             user = create_user(db, args.username, password)
             print(f"Created {user.username} ({user.id})")
+        elif args.command in ("enable-tunnel", "disable-tunnel"):
+            set_tunnel_grant(db, args.username, args.command == "enable-tunnel")
+            print("Tunnel grant updated.")
         elif args.command == "list-users":
             with db.session() as session:
                 for user in session.scalars(select(User).order_by(User.username)):

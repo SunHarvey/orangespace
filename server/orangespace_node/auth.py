@@ -8,9 +8,9 @@ import time
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
-from sqlalchemy import select
+from sqlalchemy import select, update
 
-from .database import AccessSession, Database, User
+from .database import AccessSession, Database, User, TunnelGrant
 
 
 PASSWORDS = PasswordHasher()
@@ -45,6 +45,7 @@ class Identity:
     user_id: str
     username: str
     token_digest: str
+    expires_at: int
 
 
 class LoginLimiter:
@@ -108,7 +109,7 @@ def authenticate(db: Database, token: str) -> Identity | None:
         user = session.get(User, access.user_id)
         if user is None or not user.enabled:
             return None
-        return Identity(user.id, user.username, digest)
+        return Identity(user.id, user.username, digest, access.expires_at)
 
 
 def revoke(db: Database, digest: str) -> None:
@@ -116,3 +117,17 @@ def revoke(db: Database, digest: str) -> None:
         access = session.get(AccessSession, digest)
         if access:
             access.revoked_at = int(time.time())
+
+
+def set_tunnel_grant(db: Database, username: str, enabled: bool) -> None:
+    """Trusted administrator operation; never called from the public API."""
+    with db.session() as session:
+        user = session.scalar(select(User).where(User.username == normalize_username(username)))
+        if user is None:
+            raise ValueError("user not found")
+        grant = session.get(TunnelGrant, user.id)
+        if grant is None:
+            session.add(TunnelGrant(user_id=user.id, enabled=enabled))
+        else:
+            session.execute(update(TunnelGrant).where(TunnelGrant.user_id == user.id).values(
+                enabled=enabled, epoch=TunnelGrant.epoch + 1))

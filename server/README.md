@@ -1,10 +1,10 @@
 # OrangeSpace Linux 节点文件服务
 
-已实现可运行的个人文件 API、多用户本地账号、会话认证和文件系统隔离。它不运行浏览器，不存储浏览器 Cookie，也不负责 TUIC 数据转发。后续 Windows 文件面板及浏览器上传下载桥通过这里的 API 读写文件。
+已实现可运行的个人文件 API、多用户本地账号、会话认证和文件系统隔离。新增默认关闭、管理员明确逐用户授权的短租约 TUIC 控制面和每租约独立 sing-box；设置、接口、部署前提及验证边界见 [TUNNELS.md](TUNNELS.md)。它不运行浏览器，不存储浏览器 Cookie；登录本身不授权联网。后续 Windows 文件面板及浏览器上传下载桥通过这里的文件 API 读写文件。
 
 ## 运行
 
-生产目标为 Linux、Python 3.12+、PostgreSQL。macOS 可以运行文件服务测试；Windows 不支持这里的 POSIX 目录操作。
+服务端目标为 Linux、Python 3.12+、MySQL 8.4 LTS / InnoDB / utf8mb4；节点与中心使用 SQLAlchemy 和显式 Alembic 迁移。Windows 本机沙盒元数据仍用 SQLite。旧服务端 SQLite/PostgreSQL 只保留为受控迁移源，不提供运行时回退；Windows 不支持这里的 POSIX 文件操作。
 
 ```sh
 cd server
@@ -15,26 +15,29 @@ python3 -m venv .venv
 为专用的非 root 系统账号准备 `/var/lib/orangespace/files`（权限 0700），设置 `.env.example` 中的环境变量。程序不会自动读取 `.env` 文件；由部署工具或 systemd 的 `EnvironmentFile` 注入环境。不要将真实密码写进版本库。
 
 ```sh
-.venv/bin/orangespace-node init-db
+.venv/bin/orangespace-node-migrate upgrade --database-config /etc/orangespace/database.json
+.venv/bin/orangespace-node-migrate verify --database-config /etc/orangespace/database.json
 .venv/bin/orangespace-node create-user alice
 .venv/bin/uvicorn orangespace_node.app:create_app --factory --host 127.0.0.1 --port 8080 --workers 1
 ```
 
-`create-user` 在终端私下读取密码并要求重复输入，没有公开注册接口。账号名为 3–64 位 ASCII 字母、数字、`_`、`.`、`-`，不区分大小写；密码为 12–1024 个字符。密码使用 Argon2id 哈希。
+以上为非联邦本地密码模式的 CLI 示例。`create-user` 在终端私下读取密码并要求重复输入，没有公开注册接口。配置 `ORANGESPACE_FEDERATION_CONFIG` 后必须成功加载受保护联邦配置，否则启动失败；联邦模式关闭本地密码登录，旧本地会话不能绕过联邦验证。账号名为 3–64 位 ASCII 字母、数字、`_`、`.`、`-`，不区分大小写；密码为 12–1024 个字符。密码使用 Argon2id 哈希。
 
 仅把 API 绑定到回环地址，由 Caddy 提供外部 HTTPS。API 不启用跨域访问，不使用浏览器 Cookie 认证。反向代理要限制连接、请求体大小、上传超时和登录频率。当前程序内登录限流属于单进程，并最多同时进行 4 个密码验证；部署示例使用一个 worker，多个实例必须额外使用共享限流设施。
 
-开发时可将数据库设为 `sqlite:////absolute/path/node.sqlite3`，并使用位于本机私有目录内的数据根目录。SQLite 仅作为开发/测试选择。
+`ORANGESPACE_DATABASE_CONFIG` 只指定受保护 JSON 文件路径；该文件仅包含 `database_url`，权限0600并属于运行账号/受信管理员，不将 DSN 或密码放入环境变量。连接必须使用本机绝对 Unix socket，或指定可信 CA 并正常校验名称的 TLS。运行时拒绝 SQLite/PostgreSQL URL；启动只校验迁移版本，不自动建表。保留旧库、原 UUID 和个人目录；开发不以前置备份/恢复演练或生产切换为门槛，不得用初始化替代迁移。
 
 ## API
 
-除 `/healthz` 和登录外，全部接口要求 `Authorization: Bearer <token>`。文件路径为用户根目录下的相对路径；不得传本机路径或其他用户 ID。接口响应和 `X-OrangeSpace-Node` 响应头都标识当前节点。客户端应核对预期节点身份，不能仅依赖显示名称。
+除 `/healthz`、登录和独立授权的 loopback tunnel probe 外，接口要求 Bearer 认证，请求头格式为 `Authorization: Bearer <access-token>`。文件 owner 由已认证的节点身份确定，不能用调用者任填的用户 ID 替代。响应和 `X-OrangeSpace-Node` 头标识当前节点；客户端必须核对预期身份。
 
 | 方法和地址 | 请求 | 返回 |
 |---|---|---|
 | `POST /v1/auth/login` | JSON：`username`、`password` | `access_token`、`token_type`、`expires_at`、`node_id` |
 | `POST /v1/auth/logout` | 无 | 204，撤销该 token |
 | `GET /v1/me` | 无 | `user_id`、`username`、`node_id` |
+| `GET /v1/session` | 无 | `user_id`、`username`、`node_id`、实际 `expires_at` |
+| `/v1/tunnels` 生命周期 | 单独管理员 grant；默认关闭 | 见 [短租约接口](TUNNELS.md) |
 | `GET /v1/files?path=` | 空路径表示个人文件区根目录 | `node_id`、`path`、`entries` |
 | `POST /v1/directories` | JSON：`path` | 201，目录元数据；父目录须存在 |
 | `PUT /v1/files/{path}` | 原始文件字节，不是 multipart | 201，元数据和 SHA-256；只有成功提交才返回成功 |
@@ -73,6 +76,8 @@ Windows 客户端必须把文件任务绑定到创建时的 `node_id`、认证�
 
 测试覆盖不同账号互相隔离、同账号多会话共享、路径穿越、符号链接、特殊文件、上传中断/大小限制/竞态、原子覆盖、摘要、Range、token 摘要/失效/撤销、禁用账号、登录限流、崩溃暂存清理。
 
-设置 `ORANGESPACE_TEST_POSTGRES_URL=postgresql+psycopg://...` 后，`tests/test_postgres.py` 会额外验证 PostgreSQL 真库上的初始化、用户名唯一约束、登录与会话撤销、文件 API 用户隔离。未设置时明确跳过。测试账号需要创建 schema 的权限；测试为每次运行创建一个随机命名的独立 schema，通过连接 `search_path` 使用它，结束时仅删除该 schema。不会重置整个数据库或其他应用的表。CI 应使用专用测试实例，数据库凭据通过 CI 环境注入。
+真实数据库测试设置 `ORANGESPACE_TEST_MYSQL_CONFIG=/private/node-test.json` 和 `ORANGESPACE_CONTROL_TEST_CONFIG=/private/control-test.json`（只传路径，不传 DSN）。测试使用专用 MySQL 8.4 实例；每例/模块创建唯一自有 schema、显式迁移，并精确删除自己的 schema；提供的源数据库不重建。测试账号需要相应临时 schema 创建权限。未配置真库明确跳过；部署/CI验收不得把跳过算通过。历史名称 `test_postgres.py` 当前内容已改为 MySQL 文件 API 验收，不再测试正式 PostgreSQL 运行。
 
-当前数据库初始化只创建首版表；更改已有数据库结构前需要增加版本化迁移。尚未包含总用户存储配额、集中身份管理、跨节点同步、断点上传或外部审计日志。PostgreSQL 的驱动和模型已就绪，是否完成 PostgreSQL 真库验证应以 CI/部署验证记录为准，不能由 SQLite 测试推断。
+当前源码仅支持 MySQL 正式运行，节点迁移 head 为 `node_0002`，中心为 `control_0006`。中心在 `server` 目录通过 `.venv/bin/alembic -c alembic-control.ini -x config=/etc/orangespace/control.json upgrade head` 显式迁移；节点 upgrade/verify 见上文。启动只检查版本，不自动迁移。
+
+最新本地完整验证：真实 MySQL **8.4.13** 与已核验 sing-box **1.14.4**，**258 passed、0 skipped、0 failed、17 warnings，945.39 秒**。包含中心/节点 ASGI 与真实本地 TUIC 夹具，不能推断已部署、生产 HTTPS、Windows/WFP 或完整阶段验收。CI 必须在推送后按精确提交另查，不以本地通过替代。迁移边界见 [迁移说明](../docs/mysql-migration.md)，统一身份接口见 [控制面契约](../docs/control-plane-contract-v1.md)。
