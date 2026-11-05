@@ -1,0 +1,3 @@
+{
+  "database_url": "mysql+pymysql://REPLACE_USER:***@mysql.example.invalid:3306/orangespace_node?charset=utf8mb4&ssl_ca=/etc/orangespace/ca/rds-ca.pem"
+}

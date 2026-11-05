@@ -1,0 +1,79 @@
+{
+  "scope": "S1-S2-L1-L2-source-and-injected-policy-only",
+  "portable_tests": {
+    "command": "python3 -m unittest discover -s deploy/windows-dev/tests -v",
+    "passed": 10,
+    "failed": 0,
+    "native": false,
+    "positive_package_model": "injected helper digest; reparse attributes injected, not real Windows junction"
+  },
+  "powershell": {
+    "executable": "/root/.hermes/cache/scratch/ps-s1-review/pwsh",
+    "version": "7.4.6 Linux",
+    "command": "for t in deploy/windows-dev/tests/*.ps1; do /root/.hermes/cache/scratch/ps-s1-review/pwsh -NoProfile -File \"$t\" || exit; done",
+    "harnesses_passed": 4,
+    "coverage": [
+      "real Get-Manifest source ACL admission, root/manifest/five leaves",
+      "real Get-Manifest frozen snapshot rejects changed manifest and Service",
+      "real Build caller relative helper freeze",
+      "real Assert-Protected injected root/ancestor reparse and generic/specific write rights",
+      "real Service install caller target/service collision",
+      "real Get-Target traversal scope",
+      "real Assert-Installed five exact SCM identity fields",
+      "exact production path block: actual PowerShell PWD differs from process cwd; BuildRoot/Helper/Output independently match caller directory"
+    ],
+    "native": false,
+    "os_and_scm_boundaries": "injected inert functions; no real SCM calls"
+  },
+  "tdd": {
+    "logs_directory": "/root/.hermes/cache/scratch/ps-s1-review",
+    "red": {
+      "python-red.log": "10 tests, 2 failing subtests: root and ancestor reparse attributes reached helper policy instead",
+      "ps-red.log": "exit 1: missing protected-source rejection",
+      "ps-snapshot-red.log": "exit 1: missing frozen snapshot rejection",
+      "ps-build-red.log": "exit 1: relative helper not frozen",
+      "ps-acl-red.log": "exit 1: foreign GENERIC_WRITE not rejected",
+      "parent_build_pwd_red": "actual exact production block failed BuildRoot resolved outside actual PowerShell caller directory"
+    },
+    "green": [
+      "python-green.log: 10 passed",
+      "ps-green.log: three harness PASS",
+      "parser-green.log: seven files, zero parser errors",
+      "parent actual PWD regression: all three paths passed; full build not executed"
+    ]
+  },
+  "local_parser": {
+    "platform": "Linux PowerShell 7.4.6",
+    "files": 7,
+    "errors": 0,
+    "exit_code": 0
+  },
+  "windows_parser": {
+    "current_sources_verified": true,
+    "files": 8,
+    "note": "Parent actual Windows 5.1 RAM parser receipts: original 7 scripts passed; changed Build and added build_paths separately passed. Parser only."
+  },
+  "source_sha256": {
+    "Build.ps1": "5c43dee66eda2b19b7d548157f86aba4b27956e4791434f9d6c46913988e5781",
+    "Common.ps1": "baa8ee7098129d1628d2d4ac4e7d5c86e7c5310cfa3ec6f862473ee76a5002b2",
+    "Service.ps1": "4bc854f250ff707b8883e23cee80947e91b3abfe00d0d789c8e70b3e8bc99308",
+    "Start.ps1": "90dfbf3e3eb3953d6b6d1ffd77b7ba84f7d749fb0847c2354a3c6a340da4afd8",
+    "package.py": "8335c037c858b65b516d9c3b86e5c38a9f241d2aaf273a74d1d0eeb2f2b7aa16",
+    "README.md": "eb7dde1ddceb905d12d4fd64f85a927cef5406195b4f6b237a5fd3c01fd0c1e4",
+    "tests/test_package.py": "ebffe19eb919b09623f958e4253174e9cc8719ac3da6d1a4d7da96671b1a8906",
+    "tests/acl_policy.ps1": "76cc851ef631fe50413bd60da6bb3b25692e4aa96da281f1feb231897e40038d",
+    "tests/policy_callers.ps1": "f70d4bb3194328d4c79acd7e6239d43916b3ee681de4f617f47bae99dcd99512",
+    "tests/service_admission.ps1": "145fae56ebc5c7978a4b3675734810ad793d61e73babc327bd1e2e6b61cf7380",
+    "tests/build_paths.ps1": "186ae43c0b16419186d8e92f2e728e5b8bdc4f56e044ad59555eb589b564073f"
+  },
+  "candidate_execution": false,
+  "scm_operations": false,
+  "native_build": false,
+  "final_package": false,
+  "remaining": [
+    "independent source review",
+    "Windows 5.1 parser for current sources",
+    "real Windows ACL/junction/copy and SCM lifecycle acceptance",
+    "Build Output freeze checked in source, not full build execution"
+  ]
+}

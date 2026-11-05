@@ -1,0 +1,26 @@
+# Future installation template only; replace every @...@ before installing.
+[Unit]
+Description=OrangeSpace control API and console
+After=network.target
+
+[Service]
+Type=simple
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+WorkingDirectory=@RELEASE@/server
+ExecStart=@VENV@/bin/python -m orangespace_control.cli --config @CONFIG@ serve --host 127.0.0.1 --port 8090 --dist @RELEASE@/apps/control-console/dist
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# Put release/config outside /root (e.g. /opt and /etc); readable by SERVICE_USER.
+# TLS optional: append --ssl-certfile /path/cert.pem --ssl-keyfile /path/key.pem.
+# Database migration is a separate explicit operation; startup never migrates.
+
+[Install]
+WantedBy=multi-user.target

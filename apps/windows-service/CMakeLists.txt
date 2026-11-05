@@ -1,0 +1,131 @@
+cmake_minimum_required(VERSION 3.24)
+project(OrangeSpaceService VERSION 0.1.0 LANGUAGES CXX)
+include(CTest)
+add_library(orangespace_service_policy INTERFACE)
+target_include_directories(orangespace_service_policy INTERFACE include "${CMAKE_CURRENT_SOURCE_DIR}/../windows-client/include")
+target_compile_features(orangespace_service_policy INTERFACE cxx_std_20)
+if(BUILD_TESTING)
+  add_executable(orangespace-service-policy-tests tests/policy_tests.cpp)
+  target_link_libraries(orangespace-service-policy-tests PRIVATE orangespace_service_policy)
+  add_test(NAME service-policy COMMAND orangespace-service-policy-tests)
+  add_executable(orangespace-service-chain-tests tests/chain_tests.cpp)
+  target_link_libraries(orangespace-service-chain-tests PRIVATE orangespace_service_policy)
+  add_test(NAME service-chain-policy COMMAND orangespace-service-chain-tests)
+  add_executable(orangespace-lease-v2-budget-tests tests/lease_v2_budget_tests.cpp)
+  target_link_libraries(orangespace-lease-v2-budget-tests PRIVATE orangespace_service_policy)
+  add_test(NAME service-lease-v2-budget COMMAND orangespace-lease-v2-budget-tests)
+  set_tests_properties(service-lease-v2-budget PROPERTIES TIMEOUT 30 LABELS "policy;lease-v2;allocation-audit")
+  # Keep allocation-observer positive controls enabled even in Release builds.
+  if(MSVC)
+    target_compile_options(orangespace-lease-v2-budget-tests PRIVATE /Od /W4 /permissive- /utf-8)
+  else()
+    target_compile_options(orangespace-lease-v2-budget-tests PRIVATE -O0 -fno-elide-constructors -Wall -Wextra -Werror)
+  endif()
+  foreach(_lease_test IN ITEMS start_receipt interleaving)
+    add_executable(orangespace-lease-v2-${_lease_test}-tests "tests/lease_v2_${_lease_test}_tests.cpp")
+    target_link_libraries(orangespace-lease-v2-${_lease_test}-tests PRIVATE orangespace_service_policy)
+    string(REPLACE "_" "-" _lease_test_name "${_lease_test}")
+    add_test(NAME service-lease-v2-${_lease_test_name} COMMAND orangespace-lease-v2-${_lease_test}-tests)
+    set_tests_properties(service-lease-v2-${_lease_test_name} PROPERTIES TIMEOUT 60 LABELS "policy;lease-v2;injected-not-native")
+    if(MSVC)
+      target_compile_options(orangespace-lease-v2-${_lease_test}-tests PRIVATE /Od /W4 /permissive- /utf-8)
+    else()
+      target_compile_options(orangespace-lease-v2-${_lease_test}-tests PRIVATE -O0 -fno-elide-constructors -Wall -Wextra -Werror)
+    endif()
+  endforeach()
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Exact WindowsBackend method bodies, with explicit injected OS/FFI seams.
+    # This Linux fixture neither launches a helper nor constitutes native evidence.
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME service-runtime-library-path-policy
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake_runtime_path_tests.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../.." "${CMAKE_CURRENT_BINARY_DIR}/runtime-path-policy")
+    set_tests_properties(service-runtime-library-path-policy PROPERTIES
+      TIMEOUT 180 LABELS "policy;configure-only;no-runtime-execution")
+    set(_lease_backend_fixture "${CMAKE_CURRENT_BINARY_DIR}/lease-v2-fixture/lease_v2_backend_under_test.hpp")
+    add_custom_command(OUTPUT "${_lease_backend_fixture}"
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/extract_lease_v2_backend.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/chain_windows.cpp" "${_lease_backend_fixture}"
+      DEPENDS tests/extract_lease_v2_backend.py src/chain_windows.cpp
+      VERBATIM)
+    add_executable(orangespace-lease-v2-backend-tests tests/lease_v2_backend_tests.cpp "${_lease_backend_fixture}")
+    target_include_directories(orangespace-lease-v2-backend-tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/lease-v2-fixture")
+    target_link_libraries(orangespace-lease-v2-backend-tests PRIVATE orangespace_service_policy)
+    target_compile_options(orangespace-lease-v2-backend-tests PRIVATE -O0 -fno-elide-constructors -Wall -Wextra -Werror)
+    add_test(NAME service-lease-v2-backend-policy COMMAND orangespace-lease-v2-backend-tests)
+    set_tests_properties(service-lease-v2-backend-policy PROPERTIES TIMEOUT 30 LABELS "policy;lease-v2;injected-not-native")
+    # STRING preserves untyped -D input for validation; FILEPATH would silently
+    # normalize a relative input before IS_ABSOLUTE could reject it.
+    set(ORANGESPACE_RUNTIME_TEST_LIBRARY "" CACHE STRING "Absolute fresh Linux orangespace-runtime archive for no-helper ABI policy regression")
+    if(NOT ORANGESPACE_RUNTIME_TEST_LIBRARY STREQUAL "")
+      if(NOT IS_ABSOLUTE "${ORANGESPACE_RUNTIME_TEST_LIBRARY}" OR NOT EXISTS "${ORANGESPACE_RUNTIME_TEST_LIBRARY}")
+        message(FATAL_ERROR "ORANGESPACE_RUNTIME_TEST_LIBRARY must be an existing absolute Linux archive path")
+      endif()
+      add_test(NAME service-lease-v2-engine-real-abi-policy
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/lease_v2_engine_backend_tests.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/../.." "${CMAKE_CURRENT_BINARY_DIR}/lease-v2-real-abi"
+          "${ORANGESPACE_RUNTIME_TEST_LIBRARY}")
+      set_tests_properties(service-lease-v2-engine-real-abi-policy PROPERTIES
+        ENVIRONMENT "CXX=${CMAKE_CXX_COMPILER}" TIMEOUT 120 LABELS "policy;lease-v2;real-abi-no-helper;injected-not-native")
+    else()
+      add_test(NAME service-lease-v2-engine-real-abi-policy COMMAND "${CMAKE_COMMAND}" -E echo
+        "SKIP: set ORANGESPACE_RUNTIME_TEST_LIBRARY to a freshly built Linux Rust archive")
+      set_tests_properties(service-lease-v2-engine-real-abi-policy PROPERTIES
+        SKIP_REGULAR_EXPRESSION "^SKIP:" LABELS "policy;lease-v2;requires-linux-runtime-archive")
+    endif()
+  endif()
+endif()
+if(WIN32)
+  set(ORANGESPACE_RUNTIME_LIBRARY "" CACHE FILEPATH "Required Rust orangespace-runtime static library")
+  if(NOT IS_ABSOLUTE "${ORANGESPACE_RUNTIME_LIBRARY}" OR NOT EXISTS "${ORANGESPACE_RUNTIME_LIBRARY}")
+    message(FATAL_ERROR "Windows service requires an existing absolute ORANGESPACE_RUNTIME_LIBRARY; build orangespace-runtime for this target first")
+  endif()
+  if(NOT TARGET orangespace_node_session)
+    add_library(orangespace_node_session STATIC ../windows-client/src/node_session_win.cpp ../windows-client/src/platform_session_win.cpp ../windows-client/src/credential_store_win.cpp)
+    target_include_directories(orangespace_node_session PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../windows-client/include")
+    # One Rust archive exports both helper-runtime and app-private HTTPS APIs.
+    target_link_libraries(orangespace_node_session PRIVATE winhttp advapi32 crypt32 shell32 ole32 bcrypt
+      "${ORANGESPACE_RUNTIME_LIBRARY}" ws2_32 userenv ntdll secur32 dbghelp iphlpapi)
+    target_compile_features(orangespace_node_session PUBLIC cxx_std_20)
+    target_compile_definitions(orangespace_node_session PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
+  endif()
+  add_library(orangespace_service_windows STATIC src/windows_security.cpp src/credentials.cpp src/pipe_server.cpp)
+  target_link_libraries(orangespace_service_windows PUBLIC orangespace_service_policy advapi32 crypt32 wtsapi32)
+  target_compile_definitions(orangespace_service_windows PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
+  add_executable(OrangeSpaceService src/service_main.cpp src/chain_windows.cpp)
+  target_include_directories(OrangeSpaceService PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../crates/orangespace-runtime/include")
+  # Archive/executable pin already used by the real Windows helper CI fixture.
+  target_compile_definitions(OrangeSpaceService PRIVATE ORANGESPACE_HELPER_SHA256="8f30682ee198855440d2a7fe070d5d3653793b2d01bb8c85eea88f93bbe7c8b9")
+  target_link_libraries(OrangeSpaceService PRIVATE orangespace_service_windows orangespace_node_session "${ORANGESPACE_RUNTIME_LIBRARY}"
+    bcrypt ws2_32 userenv ntdll secur32 shell32 ole32)
+  if(MINGW)
+    target_link_libraries(OrangeSpaceService PRIVATE -lstdc++ -lpthread)
+  endif()
+  if(MINGW)
+    target_link_options(OrangeSpaceService PRIVATE -municode)
+  endif()
+  if(BUILD_TESTING)
+    target_link_libraries(orangespace-service-policy-tests PRIVATE orangespace_service_windows)
+    add_executable(orangespace-service-native-tests tests/native_tests.cpp)
+    target_link_libraries(orangespace-service-native-tests PRIVATE orangespace_service_windows)
+    add_test(NAME service-native COMMAND orangespace-service-native-tests)
+    set_tests_properties(service-native PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
+    find_program(ORANGESPACE_SERVICE_POWERSHELL NAMES powershell.exe pwsh)
+    if(ORANGESPACE_SERVICE_POWERSHELL)
+      add_test(NAME service-scm-entry COMMAND "${ORANGESPACE_SERVICE_POWERSHELL}"
+        -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned
+        -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/check-scm-entry.ps1"
+        -ServiceBinary "$<TARGET_FILE:OrangeSpaceService>")
+      set_tests_properties(service-scm-entry PROPERTIES TIMEOUT 15)
+    endif()
+  endif()
+endif()
+foreach(target orangespace-service-policy-tests orangespace_service_windows OrangeSpaceService orangespace-service-native-tests)
+  if(TARGET ${target})
+    if(MSVC)
+      target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8)
+    else()
+      target_compile_options(${target} PRIVATE -Wall -Wextra -Werror)
+    endif()
+  endif()
+endforeach()

@@ -1,0 +1,238 @@
+# Windows service foundation (Phase 1)
+
+C++20 SCM service with legacy OSP1 foundation status and an OSP2 authorization/helper
+integration. **Not a usable secure browser.** OSP2 independently restores node sessions,
+controls the statically linked Rust runtime, and is wired into the management UI. Browser-open
+still always returns `browser_guard_unavailable`; there is no readiness/unsafe bypass.
+The OSP2 code has portable policy and MinGW link evidence, **not native chain acceptance**.
+The private runtime renewal contract remains an integration blocker; see below.
+
+## Implemented boundary
+
+- `OrangeSpaceService.exe` registers `OrangeSpaceFoundation` with the Windows Service
+  Control Manager, handles interrogate/stop/shutdown, and cancels pending pipe I/O on stop.
+  Direct execution fails with Windows error 1063; extra arguments fail with error 87.
+- It requires LocalSystem. `WTSEnumerateSessions` + `WTSQueryUserToken` discover logged-on Active or Disconnected
+  sessions; each endpoint binds the OS token's **SID, session ID and logon
+  AuthenticationId/LUID**, not a client-supplied account UUID. Tokens are closed immediately.
+  Up to 64 eligible logged-on sessions are supported. Session changes are reconciled every second;
+  old logon tokens cannot authenticate to a new session's endpoint.
+- Each endpoint is `\\.\pipe\OrangeSpace.Foundation.v1.session.<OS-session-id>`.
+  `PIPE_REJECT_REMOTE_CLIENTS` enforces local transport. A protected, explicit DACL grants
+  SYSTEM full control and **only that user's SID** mask `0x12019b`. The user is not granted
+  `FILE_CREATE_PIPE_INSTANCE` (`0x4`), generic write, WRITE_DAC, or WRITE_OWNER.
+  `FILE_FLAG_FIRST_PIPE_INSTANCE` on initial creation and a continuously retained live
+  instance during listener handoff fail closed on name squatting;
+  a failed worker stops the foundation rather than substituting a permissive endpoint.
+- After reading a message, the server uses `ImpersonateNamedPipeClient` and the actual
+  thread token to verify SID/session/logon and sufficient impersonation level. Failure
+  never falls back to a JSON claim or process token. Failure to revert terminates the process.
+- Request buffers, response buffers, accepted commands and per-I/O time are fixed/bounded.
+  Clients cannot select privileged executable/catalog paths, user/node/tunnel identities,
+  resulting generations, or shell commands. OSP2 envelopes are accepted only after the same
+  OS peer checks; WinHTTP reauthenticates against the service's own fixed protected catalog.
+  Each endpoint bounds concurrent requests to eight, allowing logout while HTTPS is pending.
+  Availability against a hostile process already running as the authorized user is not guaranteed.
+
+Local administrators/SYSTEM and malware already running as the authorized Windows user
+are not isolated from that user's identity or DPAPI data by this design. Client-side server
+identity authentication is implemented in the native status client: SCM binding, a retained
+service process handle, actual pipe-server PID, canonical response and ACK. The management
+UI and credential-bearing capability flow now use the same SCM/PID/held-process checks
+before OSP2 credentials. OSP1 remains deliberately secret-free and is not authentication.
+
+## Wire protocol v1
+
+Use message-mode pipes. Open client handles with individual access mask `0x12019b`
+(and `SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION`), not GENERIC_WRITE.
+Wait for pipe availability between connections.
+
+Exactly one **12-byte message** per connection:
+
+| Offset | Bytes | Meaning |
+|---|---|---|
+| 0 | 4 | ASCII `OSP1` (protocol/version) |
+| 4 | 2 | Little-endian command: 1 = status; 2 = browser-open |
+| 6 | 2 | Reserved flags, must be zero |
+| 8 | 4 | Little-endian payload length, must be zero |
+
+Unknown commands/flags, any payload, undersized/oversized messages, or failed identity
+checks are disconnected without dispatch. OSP1 has no JSON requests. OSP2 uses a separate
+bounded strict schema; identity and ready claims cannot influence authorization.
+
+A valid response is one message: a four-byte little-endian body length followed by static
+UTF-8 JSON (total at most 1024 bytes). Status explicitly reports `authenticated:false`,
+`browser_allowed:false`, `credential_ipc:false`. The client must read that message and send
+one byte `0x06` ACK; the server then disconnects. This avoids an unbounded
+`FlushFileBuffers` wait or discarding an unread response. Read, write and ACK phases each
+have a 1500 ms deadline and are cancellable during stop. There is no command pipelining.
+
+## OSP2 authorization and durable sandbox CAS
+
+The same pipe carries an independent `OSP2` 12-byte header: four magic bytes, one opcode
+(1 authorize, 2 start, 3 stop, 4 logout, 5 status), three zero reserved bytes, then a
+little-endian u32 JSON length. One complete message only; payload maximum 16384 bytes,
+response maximum 65540 bytes including its four-byte length. Duplicate/unknown fields,
+invalid UTF-8/UUID/integer, trailing bytes and missing CAS are rejected. Every response
+keeps `browser_allowed:false`; ACK remains `0x06`.
+
+- Authorize: `{alias,envelope}`. The envelope is independently restored against service-owned
+  `nodes.json`. The service returns a random local `auth_id` bound to the actual OS peer
+  and the authenticated node API session. Auth IDs and credentials are never persisted.
+- Start fresh: `{auth_id}` returns a service-chosen sandbox/tunnel and generation.
+  Start/switch existing: `{auth_id,sandbox_id,expected_generation}`. The supplied generation
+  is CAS only: the service reserves the next generation durably, invalidates/stops the exact
+  previous binding before new node I/O, then checks auth-object and reservation identity
+  again before publishing. A captured old A operation cannot reclaim switched B.
+- Stop: `{auth_id,sandbox_id,expected_generation}`. Only its current exact realm/binding
+  is stopped. The reply returns `{ok,browser_allowed,sandbox_id,generation}` with the new
+  service cursor. Sibling sandboxes are not stopped.
+- Logout: `{auth_id}` invalidates local grants and helper processes before fallible remote
+  logout. Status `{auth_id}` reports separate proven process/TUIC/forwarding fields;
+  `{auth_id,sandbox_id}` returns the current owned cursor for explicit failure recovery.
+
+Each local authorization owns a distinct Rust runtime handle: two sandboxes under A share
+that handle, B's independently authenticated node/session has another. A service-wide
+namespace checks SID ownership and active session/LUID ownership across runtime handles.
+The UI retains existing broker CLI operations only for local metadata; no helper runs via
+that CLI, and no username/UUID federation is introduced.
+
+Before first authorized installation, provision **once** fixed `service-state.json` next
+to the service with `{"schema":1,"sandboxes":[]}`, owner SYSTEM/Administrators and protected
+DACL `D:P(A;;FA;;;SY)(A;;FA;;;BA)`. Never overwrite existing state. It stores only service
+sandbox UUID, owner SID and monotonic generation. Missing, corrupt, unsupported ACL,
+unexpected drift or failed writes latch authorization failure, never reset to zero.
+Reservations, including failed node attempts, use exclusive fixed `service-state.next`,
+file flush, write-through same-volume replacement and readback before any API create.
+Protected ancestor handles remain held. An unexpected crash-left `.next` requires explicit
+administrator investigation; the service never guesses whether to discard it. Privileged
+writers remain trusted; compare/write is not atomic against a competing privileged writer.
+
+Only adjacent fixed `sing-box.exe` is admitted. The executable SHA-256 is compiled from the
+existing archive-verified Windows fixture pin. File and ancestor ACL/reparse checks and
+held handles without write/delete sharing precede FFI creation and remain through launches.
+Windows builds require an absolute existing `ORANGESPACE_RUNTIME_LIBRARY`; no runtime DLL
+or arbitrary privileged executable-selection IPC exists.
+
+**Private runtime renewal:** after authenticated node lease renewal, service code calls
+`{op:"renew",binding,expires_at}` to extend only the exact live runtime binding. The runtime
+implements this operation and documents its trusted-caller contract in the private header.
+It rejects stale, expired or closed bindings, caps the remaining lifetime at 30 seconds,
+and does not issue a new forwarding proof. Equal expiry cannot extend the monotonic deadline.
+The Core canonical-IP TLS identity and private renewal deltas passed independent review and
+Linux real-Go/TUIC tests; this is not Windows native-chain or public-CA IP-SAN acceptance.
+Periodic local polling remains required for expiry cleanup.
+
+Opt-in native runners (not automatically executed by portable CTest):
+`OrangeSpaceLogin.exe --service-chain-stdin <catalog> <alias>` reads one bounded credential
+envelope through an anonymous stdin pipe; `--service-switch-stdin <catalog> <aliasA> <aliasB>`
+reads two envelopes separated by newline. Neither accepts secrets in argv/environment or
+prints envelopes. They require real protected installations, real HTTPS and real tunnel
+proofs; only a successful actual run can establish native acceptance. The switch runner
+checks independent auth realms, CAS rejection and surviving A sibling after B stop/logout.
+
+## User-bound credential primitive
+
+`protect_credential` / `unprotect_credential` are Windows-only native library primitives,
+not exposed over the foundation IPC. They call current-user DPAPI with
+`CRYPTPROTECT_UI_FORBIDDEN`, **never** `CRYPTPROTECT_LOCAL_MACHINE`, and reject SYSTEM,
+service accounts and session-0 execution. Calling code must already be running under the
+intended interactive user's token with the appropriate loaded profile; failures propagate.
+The service does not currently impersonate users to call these functions.
+
+DPAPI entropy binds a versioned OrangeSpace purpose, the OS-derived user SID, and a
+caller-supplied public scope (for example a future trusted node/credential-purpose binding).
+Secret input is bounded to 1..4096 bytes, ciphertext to 1..16384 bytes, and scope to
+1..256 printable non-space ASCII bytes. The unwrapped `Secret` is noncopyable and wipes
+its DPAPI allocation before freeing it. Callers must separately wipe their own input buffers.
+There are no secret-bearing logs, command-line arguments, environment variables or
+plaintext persistence, and no plaintext fallback. The client `CredentialStore` now persists
+only user-DPAPI protected blobs with per-user ACLs; load always reauthenticates.
+
+Windows SID verification is not a node login. OSP2 derives remote identity only from
+independent `NodeSession::restore_envelope` against fixed `nodes.json` next to the service.
+WFP/DNS enforcement, browser/CEF startup, signed installation and updater policy remain
+outside this integration. No fake server result is native or successful HTTPS evidence.
+
+## Build and tests
+
+Portable policy tests (Linux/macOS/Windows):
+
+```sh
+cmake -S apps/windows-service -B build/service
+cmake --build build/service
+ctest --test-dir build/service --output-on-failure
+```
+
+The existing root/client CMake build also includes these tests and, on Windows, the native
+service/library/tests. `scripts/build-windows.ps1` stages the service executable alongside
+the development manager; it **does not install or start it**.
+
+On a VS2022 + Windows SDK host:
+
+```powershell
+cmake -S apps/windows-service -B build/service-win -A x64 -DORANGESPACE_RUNTIME_LIBRARY=C:/absolute/build/orangespace_runtime.lib
+cmake --build build/service-win --config Release
+ctest --test-dir build/service-win -C Release --output-on-failure
+```
+
+`service-native` exercises real DPAPI roundtrip, entropy mismatch/tamper rejection,
+actual pipe DACL readback, denied second server instances, a denied Everyone-restricted
+token, real same-user token verification, SID/session/logon mismatch rejection, malformed
+frames, idle I/O timeout, cancellation and the browser denial response. It does **not**
+create a second local account or prove cross-account DPAPI denial. It returns CTest skip
+code 77 in session 0/SYSTEM instead of silently pretending user-bound tests ran.
+
+For OpenSSH (session 0), with that same user already logged on, this non-GUI runner uses
+one temporary **limited, interactive-token** scheduled task, no password and no elevation:
+
+```powershell
+./apps/windows-service/tests/run-interactive.ps1 -TestBinary ./build/service-win/Release/orangespace-service-native-tests.exe
+./apps/windows-service/tests/check-scm-entry.ps1 -ServiceBinary ./build/service-win/Release/OrangeSpaceService.exe
+```
+
+The runner removes its task and temporary output in `finally` and verifies task deletion.
+A disconnected RDP session is sufficient for these non-GUI tests, but not for browser/UI
+validation. The SCM-entry test only checks direct-launch denial, never installs a service.
+
+## Validation boundary (2026-10-29)
+
+Portable tests were written first and observed RED for missing peer authorization,
+strict frame decoding, browser denial, and protected SID-only ACL policy, then GREEN.
+Root CMake/CTest passed on Linux. The service and native tests were cross-built for
+Windows x64 with MinGW `-Wall -Wextra -Werror` and statically linked runtime libraries.
+Native DPAPI/pipe tests and SCM-entry denial checks passed on Windows 11 build 26200
+under a limited interactive user token (temporary task, disconnected desktop).
+The integration pass additionally ran `tests/check-scm-lifecycle.ps1` with an elevated
+test token: a fresh administrator-protected Program Files fixture, exact copied hash,
+LocalSystem registration readback, actual SCM start/stop and process-path verification,
+then verified service and fixture deletion. This did not alter existing product services.
+
+**Not performed:** active-WTS endpoint enumeration and multi-session
+lifecycle under the installed service, actual second-account denial, server
+authentication mapping, any browser/network isolation gate. The desktop was disconnected
+for the SCM lifecycle smoke test, so no active session endpoint was exercised.
+The real SCM lifecycle must be tested on an explicitly authorized Windows test host with
+the binary installed in an administrator-controlled, non-user-writable directory; do not
+register a LocalSystem service whose executable/DLLs can be replaced by an ordinary user.
+
+## Installed status IPC and DACL correction
+
+The real limited-client handshake, pending-read cancellation and fresh handshake after
+SCM restart were exercised in an existing Disconnected session without changing RDP state.
+The service grants only query-limited/synchronize observation rights to OS-validated peers,
+retaining an immutable original process DACL and its deny semantics; it never rebuilds
+SYSTEM/Administrators policy. Removed peers lose only service-managed new-handle grants.
+Native AccessCheck regression and the DACL correction passed independent review.
+User-SID observation spans logons, existing handles cannot be revoked, and privileged
+concurrent descriptor updates have no atomic compare-and-swap guarantee.
+
+Exact evidence, reproduction and unverified cases are in
+[`docs/service-ipc-validation.md`](../../docs/service-ipc-validation.md). This is still
+secret-free status IPC, not completed Phase 1, credential IPC, helper containment or WFP.
+
+Microsoft API references:
+- https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights
+- https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/nf-wtsapi32-wtsqueryusertoken
+- https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-impersonatenamedpipeclient
+- https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata

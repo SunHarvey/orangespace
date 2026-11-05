@@ -1,0 +1,4 @@
+# Offline legacy PostgreSQL import/export only; never install for the serving runtime.
+-r requirements.lock
+psycopg==3.3.6
+psycopg-binary==3.3.6

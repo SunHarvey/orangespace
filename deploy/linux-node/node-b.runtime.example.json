@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "nodeUUID": "f6224bf7-a363-43fb-8c0b-417794c91b7a",
+  "dataRoot": "/var/lib/orangespace-node-b/files",
+  "dbConfig": "/etc/orangespace-linux-node/b/database.json",
+  "tunnelConfig": null,
+  "federationConfig": null,
+  "listenHost": "127.0.0.1",
+  "listenPort": 19092
+}

@@ -1,0 +1,7 @@
+add_executable(orangespace-wfp-baseline main.cpp)
+target_compile_features(orangespace-wfp-baseline PRIVATE cxx_std_20)
+target_compile_definitions(orangespace-wfp-baseline PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
+target_link_libraries(orangespace-wfp-baseline PRIVATE fwpuclnt rpcrt4 ole32)
+if(MSVC)
+    target_compile_options(orangespace-wfp-baseline PRIVATE /W4 /WX /utf-8)
+endif()

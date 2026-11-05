@@ -1,0 +1,15 @@
+{
+    # TUIC occupies UDP 443; Caddy serves the File API over TCP only.
+    servers {
+        protocols h1 h2
+    }
+}
+
+{$ORANGESPACE_API_DOMAIN} {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:8080
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+}

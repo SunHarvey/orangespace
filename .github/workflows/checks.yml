@@ -1,0 +1,290 @@
+name: Checks
+on: [push, pull_request]
+permissions:
+  contents: read
+env:
+  CARGO_BUILD_JOBS: '1'
+  CMAKE_BUILD_PARALLEL_LEVEL: '1'
+jobs:
+  core-and-tunnel:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust checks
+        run: |
+          cargo fmt --all -- --check
+          cargo test --workspace --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo build --workspace --locked
+      - name: Verify minimum Rust with the committed lockfile
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal
+          cargo +1.89.0 test --workspace --locked
+      - name: Native model checks
+        run: |
+          cmake -S . -B build -DORANGESPACE_RUNTIME_TEST_LIBRARY="$PWD/target/debug/liborangespace_runtime.a"
+          cmake --build build
+          ctest --test-dir build --output-on-failure
+      - name: GUI caller regressions (injected policy, not actual GUI acceptance)
+        run: |
+          python3 apps/windows-client/tests/platform_ui_status_tests.py --output "$RUNNER_TEMP/orangespace-ui-status"
+          python3 apps/windows-client/tests/platform_ui_adoption_tests.py --output "$RUNNER_TEMP/orangespace-ui-adoption"
+          python3 apps/windows-client/tests/platform_ui_logout_tests.py --output "$RUNNER_TEMP/orangespace-ui-logout"
+      - name: Development package policy checks (not runtime acceptance)
+        run: |
+          python3 -m unittest discover -s deploy/packages/tests -v
+          python3 -m unittest discover -s deploy/windows-dev/tests -v
+      - name: Verify actual TUIC TCP and UDP
+        run: |
+          curl -fL --retry 3 https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64.tar.gz -o /tmp/sing-box.tar.gz
+          echo '699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968  /tmp/sing-box.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/sing-box.tar.gz -C /tmp
+          python3 scripts/smoke_tuic.py --sing-box /tmp/sing-box-1.14.4-linux-amd64/sing-box
+          ORANGESPACE_TEST_SING_BOX=/tmp/sing-box-1.14.4-linux-amd64/sing-box cargo test -p orangespace-core --locked --test helper_runtime -- --ignored
+          python3 -c 'import subprocess; cases=subprocess.check_output(["cargo","test","-p","orangespace-runtime","--locked","--lib","--","--list"],text=True); required=["real_tuic_proof_not_stdin_and_close_a_does_not_close_b","real_socks_stdin_without_tuic_never_reports_authenticated_or_running","real_renew_extends_only_live_exact_binding_past_initial_expiry","real_renew_never_revives_expired_binding_even_before_poll"]; assert all("tests::"+name+": test" in cases.splitlines() for name in required), "required real runtime cases missing"'
+          ORANGESPACE_TEST_SING_BOX=/tmp/sing-box-1.14.4-linux-amd64/sing-box cargo test -p orangespace-runtime --locked --lib -- --ignored --test-threads=1
+  node-mysql:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: python -m pip install -r requirements.lock -e '.[test]'
+        working-directory: server
+      - name: Dependency lock and offline fixture validation (not browser validation)
+        run: python -m unittest discover -s scripts -p 'test_*.py' -v
+      - name: Real MySQL and all real runtime tests (not deployment or Windows acceptance)
+        working-directory: server
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          PYTHON="$(command -v python)"
+          sudo -- "$PYTHON" - "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" <<'PY'
+          import hashlib, io, json, os, re, resource, shutil, stat, subprocess, sys, tarfile, time, urllib.request
+          from pathlib import Path
+          from sqlalchemy.engine import URL
+          import xml.etree.ElementTree as ET
+          resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+          assert os.geteuid() == 0 and resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
+          run, attempt = sys.argv[1:3]
+          assert re.fullmatch(r'[1-9][0-9]{0,19}', run) and re.fullmatch(r'[1-9][0-9]{0,9}', attempt)
+          root = Path('/var/lib') / ('orangespace-ci-' + run + '-' + attempt)
+          marker = 'orangespace-node-mysql:' + run + ':' + attempt
+          os.umask(0o077)
+          root.mkdir(mode=0o700)  # CreateNew: never adopt an existing directory.
+          with (root / 'owner').open('x') as stream:
+              stream.write(marker)
+          name = 'orangespace-mysql-' + run + '-' + attempt
+          container = None
+          try:
+              for leaf in ('socket', 'tmp', 'runtime'):
+                  (root / leaf).mkdir(mode=0o700)
+              # Public disposable fixture password only; never substitute production credentials.
+              result = subprocess.run(['docker', 'run', '--detach', '--name', name,
+                  '--label', 'orangespace.ci.owner=' + marker,
+                  '--env', 'MYSQL_ROOT_PASSWORD=ci-disposable-only',
+                  '--env', 'MYSQL_DATABASE=orangespace_node_test',
+                  '--mount', 'type=bind,src=' + str(root / 'socket') + ',dst=/var/run/mysqld',
+                  'mysql:8.4.13', '--skip-networking'], check=True, capture_output=True, text=True)
+              container = result.stdout.strip()
+              assert re.fullmatch('[0-9a-f]{64}', container)
+              for _ in range(120):
+                  ready = subprocess.run(['docker', 'exec', '--env', 'MYSQL_PWD=ci-disposable-only',
+                      container, 'mysql', '--protocol=socket', '--user=root',
+                      '--database=orangespace_node_test', '--batch', '--skip-column-names',
+                      '--execute=SELECT VERSION()'], capture_output=True, text=True)
+                  if ready.returncode == 0 and ready.stdout.strip().startswith('8.4.13'):
+                      break
+                  time.sleep(2)
+              else:
+                  raise RuntimeError('disposable MySQL readiness failed')
+              url = URL.create('mysql+pymysql', username='root', password='ci-disposable-only',
+                  host='localhost', database='orangespace_node_test',
+                  query={'unix_socket': str(root / 'socket' / 'mysqld.sock'), 'charset': 'utf8mb4'})
+              for leaf, extra in [('node.json', {}), ('control.json', {'session_ttl_seconds': 3600})]:
+                  with (root / leaf).open('x') as stream:
+                      json.dump({'database_url': url.render_as_string(hide_password=False), **extra}, stream)
+              archive_url = 'https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64.tar.gz'
+              with urllib.request.urlopen(archive_url, timeout=60) as response:
+                  archive = response.read(100 * 1024 * 1024 + 1)
+              assert len(archive) <= 100 * 1024 * 1024
+              assert hashlib.sha256(archive).hexdigest() == '699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968'
+              with tarfile.open(fileobj=io.BytesIO(archive), mode='r:gz') as tar:
+                  members = [m for m in tar.getmembers() if Path(m.name).name == 'sing-box']
+                  assert len(members) == 1
+                  member = members[0]
+                  assert member.name == 'sing-box-1.14.4-linux-amd64/sing-box'
+                  assert member.isfile() and 0 < member.size <= 100 * 1024 * 1024
+                  with tar.extractfile(member) as stream:
+                      binary = stream.read(100 * 1024 * 1024 + 1)
+              assert len(binary) == member.size and binary.startswith(b'\x7fELF')
+              assert hashlib.sha256(binary).hexdigest() == '1264361b5f8868c8768f7555d3e77e20118bf503c41ac08bb290a0d99056aa3a'
+              executable = root / 'runtime' / 'sing-box'
+              with executable.open('xb') as stream:
+                  stream.write(binary)
+              executable.chmod(0o700)  # Only verified bytes become executable.
+              env = dict(os.environ, ORANGESPACE_TEST_MYSQL_CONFIG=str(root / 'node.json'),
+                  ORANGESPACE_CONTROL_TEST_CONFIG=str(root / 'control.json'),
+                  ORANGESPACE_TEST_SING_BOX=str(executable), TMPDIR=str(root / 'tmp'),
+                  PYTHONDONTWRITEBYTECODE='1')
+              report = root / 'results.xml'
+              tested = subprocess.run([sys.executable, '-m', 'pytest', '-q', '--assert=plain', '--tb=short',
+                  '--basetemp=' + str(root / 'tmp' / 'pytest'), '--junitxml=' + str(report)], env=env)
+              suites = ET.parse(report).getroot()
+              cases = list(suites.iter('testcase'))
+              assert cases and not list(suites.iter('skipped')) and not list(suites.iter('error'))
+              assert not list(suites.iter('failure')) and tested.returncode == 0
+          finally:
+              # Remove only the exact container ID with our label; never use a guessed name.
+              if container is not None:
+                  label = subprocess.check_output(['docker', 'inspect', '--format',
+                      '{{ index .Config.Labels "orangespace.ci.owner" }}', container], text=True).strip()
+                  assert label == marker
+                  subprocess.run(['docker', 'rm', '--force', container], check=True, stdout=subprocess.DEVNULL)
+              info = root.lstat()
+              owned = stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o700
+              proof = root / 'owner'
+              pi = proof.lstat()
+              owned = owned and stat.S_ISREG(pi.st_mode) and pi.st_uid == 0 and pi.st_nlink == 1 and stat.S_IMODE(pi.st_mode) == 0o600
+              if owned and proof.read_text() == marker:
+                  shutil.rmtree(root)
+              else:
+                  raise RuntimeError('unknown fixture ownership; preserved')
+          PY
+      - name: Always clean only proven owned disposable fixtures
+        if: always()
+        run: |
+          set -euo pipefail
+          PYTHON="$(command -v python)"
+          sudo -- "$PYTHON" - "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" <<'PY'
+          import json, os, re, resource, shutil, stat, subprocess, sys
+          from pathlib import Path
+          resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+          run, attempt = sys.argv[1:3]
+          assert re.fullmatch(r'[1-9][0-9]{0,19}', run) and re.fullmatch(r'[1-9][0-9]{0,9}', attempt)
+          root = Path('/var/lib') / ('orangespace-ci-' + run + '-' + attempt)
+          marker = 'orangespace-node-mysql:' + run + ':' + attempt
+          if not root.exists() and not root.is_symlink():
+              sys.exit(0)
+          ri = root.lstat()
+          assert stat.S_ISDIR(ri.st_mode) and ri.st_uid == 0 and stat.S_IMODE(ri.st_mode) == 0o700, 'unknown directory preserved'
+          proof = root / 'owner'
+          pi = proof.lstat()
+          assert stat.S_ISREG(pi.st_mode) and pi.st_uid == 0 and pi.st_nlink == 1 and stat.S_IMODE(pi.st_mode) == 0o600, 'unknown marker preserved'
+          assert proof.read_text() == marker, 'unknown marker preserved'
+          name = 'orangespace-mysql-' + run + '-' + attempt
+          inspected = subprocess.run(['docker', 'inspect', name], capture_output=True, text=True)
+          if inspected.returncode == 0:
+              item, = json.loads(inspected.stdout)
+              assert item['Config']['Labels'].get('orangespace.ci.owner') == marker, 'unknown container preserved'
+              subprocess.run(['docker', 'rm', '--force', item['Id']], check=True, stdout=subprocess.DEVNULL)
+          else:
+              # A daemon error is not proof that the container is absent.
+              known = subprocess.check_output(['docker', 'ps', '-a', '--format', '{{.Names}}'], text=True).splitlines()
+              assert name not in known, 'container state unknown; directory preserved'
+          shutil.rmtree(root)
+          PY
+  control-console:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/control-console/package-lock.json
+      - name: Vue typecheck, unit tests and production build (not browser E2E)
+        working-directory: apps/control-console
+        run: |
+          npm ci
+          npm run typecheck
+          npm test -- --maxWorkers=1
+          npm run build
+  windows-manager:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust helper lifecycle tests on Windows (not WFP validation)
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $logPath = Join-Path $env:RUNNER_TEMP ('orangespace-rust-' + [guid]::NewGuid().ToString('N') + '.log')
+          cargo test -p orangespace-core -p orangespace-runtime --locked *> $logPath
+          $cargoExitCode = $LASTEXITCODE
+          Get-Content -LiteralPath $logPath
+          if ($cargoExitCode -ne 0) {
+            $details = (Get-Content -LiteralPath $logPath -Tail 60) -join "`n"
+            if ($details.Length -gt 3000) { $details = $details.Substring($details.Length - 3000) }
+            $details = $details.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Windows Rust cargo failure::cargo exit $cargoExitCode; last 60 lines (at most 3000 characters):%0A$details"
+            exit 1
+          }
+      - name: Real Windows sing-box helper lifecycle (not WFP validation)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $fixture = Join-Path $env:RUNNER_TEMP ('os-singbox-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $fixture | Out-Null
+          try {
+            $archive = Join-Path $fixture 'runtime.zip'
+            Invoke-WebRequest -Uri 'https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip' -OutFile $archive
+            if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne '99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df') { throw 'Runtime archive hash mismatch' }
+            Expand-Archive -LiteralPath $archive -DestinationPath $fixture
+            $env:ORANGESPACE_TEST_SING_BOX = Join-Path $fixture 'sing-box-1.14.4-windows-amd64/sing-box.exe'
+            if ((Get-FileHash -LiteralPath $env:ORANGESPACE_TEST_SING_BOX -Algorithm SHA256).Hash -ne '8f30682ee198855440d2a7fe070d5d3653793b2d01bb8c85eea88f93bbe7c8b9') { throw 'Runtime executable hash mismatch' }
+            $cases = cargo test -p orangespace-core --locked --test helper_runtime -- --list
+            if ($LASTEXITCODE -ne 0 -or !($cases -contains 'real_sing_box_stdin_authentication_and_independent_lifecycle: test') -or !($cases -contains 'windows_crash::real_sing_box_dies_after_abrupt_supervisor_exit: test')) { throw 'Required real-runtime tests are missing' }
+            cargo test -p orangespace-core --locked --test helper_runtime -- --exact real_sing_box_stdin_authentication_and_independent_lifecycle --ignored --nocapture --test-threads=1
+            if ($LASTEXITCODE -ne 0) { throw 'Real helper authentication/lifecycle test failed' }
+            cargo test -p orangespace-core --locked --test helper_runtime -- --exact windows_crash::real_sing_box_dies_after_abrupt_supervisor_exit --ignored --nocapture --test-threads=1
+            if ($LASTEXITCODE -ne 0) { throw 'Real helper supervisor-crash test failed' }
+          } finally {
+            Remove-Item Env:ORANGESPACE_TEST_SING_BOX -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $fixture) { Remove-Item -LiteralPath $fixture -Recurse -Force }
+          }
+      - name: Build native manager and block-only WFP component
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $logPath = Join-Path $env:RUNNER_TEMP ('orangespace-native-' + [guid]::NewGuid().ToString('N') + '.log')
+          pwsh -NoProfile -File ./scripts/build-windows.ps1 *> $logPath
+          $buildExitCode = $LASTEXITCODE
+          Get-Content -LiteralPath $logPath
+          if ($buildExitCode -ne 0) {
+            $details = (Get-Content -LiteralPath $logPath -Tail 60) -join "`n"
+            if ($details.Length -gt 3000) { $details = $details.Substring($details.Length - 3000) }
+            $details = $details.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Windows native build failure::build exit $buildExitCode; last 60 lines (at most 3000 characters):%0A$details"
+            exit 1
+          }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Compile pinned CEF bootstrap/client.dll (never launch browser)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          trap {
+            $failure = ($_.Exception.Message + "`n" + $_.ScriptStackTrace).Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=CEF validation failure::$failure"
+            exit 1
+          }
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$installation) { throw 'MSVC installation not found' }
+          $tools = Get-ChildItem (Join-Path $installation 'VC/Tools/MSVC') -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          $env:PATH = (Join-Path $tools.FullName 'bin/Hostx64/x64') + [IO.Path]::PathSeparator + $env:PATH
+          $lock = Get-Content apps/windows-client/cef/cef.lock.json -Raw | ConvertFrom-Json
+          $archive = Join-Path $env:RUNNER_TEMP $lock.archive
+          Invoke-WebRequest -Uri $lock.archive_url -OutFile $archive
+          $logPath = Join-Path $env:RUNNER_TEMP 'orangespace-cef-build.log'
+          try {
+            ./scripts/cef-build-windows.ps1 -Archive $archive -BuildDirectory (Join-Path $env:RUNNER_TEMP ('orangespace-cef-' + [guid]::NewGuid().ToString('N'))) *>&1 | Tee-Object -FilePath $logPath
+          } catch {
+            $details = if (Test-Path $logPath) { (Get-Content $logPath -Tail 60) -join "`n" } else { $_.Exception.Message }
+            $details = $details.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=CEF build diagnostics::$details"
+            throw
+          }

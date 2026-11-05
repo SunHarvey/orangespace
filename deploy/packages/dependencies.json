@@ -1,0 +1,29 @@
+{
+  "node": ">=26.0.0 <27.0.0",
+  "npm": ">=11.0.0 <13.0.0",
+  "python_build": {
+    "hatchling": "1.27.0",
+    "packaging": "26.3",
+    "pathspec": "0.12.1",
+    "pluggy": "1.7.0",
+    "trove-classifiers": "2025.1.15.22"
+  },
+  "helper": {
+    "version": "1.14.4",
+    "linux_archive": "sing-box-1.14.4-linux-amd64.tar.gz",
+    "linux_archive_url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64.tar.gz",
+    "linux_archive_sha256": "699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968",
+    "linux_binary_sha256": "1264361b5f8868c8768f7555d3e77e20118bf503c41ac08bb290a0d99056aa3a",
+    "windows_archive": "sing-box-1.14.4-windows-amd64.zip",
+    "windows_archive_url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip",
+    "windows_archive_sha256": "99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df",
+    "windows_binary_sha256": "8f30682ee198855440d2a7fe070d5d3653793b2d01bb8c85eea88f93bbe7c8b9",
+    "windows_provenance": "Official SagerNet v1.14.4 GitHub release asset 669527524: publisher API asset.digest matched downloaded ZIP SHA-256; unique sing-box.exe matched approved binary SHA-256 (2026-10-31).",
+    "source_archive_url": "https://codeload.github.com/SagerNet/sing-box/tar.gz/refs/tags/v1.14.4",
+    "files": {
+      "sing-box-v1.14.4-source.tar.gz": "0958ccd23b1ea9a141d715d15478b1e040fd04bcca19d8ff5529636b1b753e18",
+      "LICENSE.sing-box": "650d5e3b99a446fb38e820fa87a49562e0c79eab868fff58618ac487a58e554c",
+      "COPYING.GPL-3.0": "fb981668c18a279e285fc4d83fba1e836cc84dd4daa73c9697d3cfd2d8aca6e0"
+    }
+  }
+}

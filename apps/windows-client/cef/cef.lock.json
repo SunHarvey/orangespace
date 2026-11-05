@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "platform": "windows64",
+  "cef_version": "156.0.14+g4fa4ab5+chromium-156.0.8078.48",
+  "chromium_version": "156.0.8078.48",
+  "cef_commit": "4fa4ab516dacf6c49fc7e6e70d2b7ebce29fa35f",
+  "api_version": 15600,
+  "api_hash_windows": "8f211699a44daedd96ae2a89bbf3a8f2abc229f3",
+  "sandbox_compat": "3b66cadf26145637",
+  "archive": "cef_binary_156.0.14+g4fa4ab5+chromium-156.0.8078.48_windows64_minimal.tar.bz2",
+  "archive_size": 175051364,
+  "archive_sha1": "72dc1dd1636acc2391609fa6f410aa09f09168d4",
+  "archive_sha256": "99f8a6dffd47417e0caee7845a98c549b41f1d4246cd715dec843ca4b699ee57",
+  "archive_url": "https://cef-builds.spotifycdn.com/cef_binary_156.0.14%2Bg4fa4ab5%2Bchromium-156.0.8078.48_windows64_minimal.tar.bz2",
+  "index_url": "https://cef-builds.spotifycdn.com/index.json",
+  "verified_date": "2026-10-29"
+}
