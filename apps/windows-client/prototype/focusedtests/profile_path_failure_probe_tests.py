@@ -3,7 +3,7 @@ import subprocess,tempfile
 root=Path(__file__).resolve().parents[4]
 s=(root/'apps/windows-client/prototype/bootstrap_prototype_win.cc').read_text()
 assert 'void ProfilePathFailure(' in s,'missing bounded metadata failure probe'
-a=s.index('void ProfilePathFailure(');b=s.index('\nvoid WindowFailureContext()',a);fn=s[a:b]
+a=s.index('void ProfilePathFailure(');b=s.index('\nLONG CALLBACK OfflineNativeFailure',a);fn=s[a:b]
 assert 'ProfilePathFailure(path.c_str(),profile_depth,attributes==INVALID_FILE_ATTRIBUTES?GetLastError():0);return 244;' in s
 code=r"""
 #include <string>

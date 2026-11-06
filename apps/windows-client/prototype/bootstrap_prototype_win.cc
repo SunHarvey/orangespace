@@ -13,7 +13,6 @@
 #include <cstring>
 #include <cstdio>
 #include <vector>
-#include <aclapi.h>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -51,52 +50,6 @@ void ProfilePathFailure(LPCWSTR path,DWORD depth,DWORD attributes_error) noexcep
   if(h==INVALID_HANDLE_VALUE)open_error=GetLastError();else {BY_HANDLE_FILE_INFORMATION info{};if(GetFileInformationByHandle(h,&info))attributes=info.dwFileAttributes;else info_error=GetLastError();CloseHandle(h);}
   char text[224]{};std::snprintf(text,sizeof(text),"profile-path depth=%lu attributes-error=%lu open-error=%lu info-error=%lu handle-attributes=%lu\n",depth,attributes_error,open_error,info_error,attributes);OfflineEarlyLog(text);
  }catch(...){}SetLastError(saved);
-}
-void WindowFailureContext() {
-  const auto note=[](const char* label,DWORD value){char b[128]{};std::snprintf(b,sizeof(b),"window-context %s=%lu\n",label,static_cast<unsigned long>(value));OfflineEarlyLog(b);};
-  note("pid",GetCurrentProcessId());DWORD session{};ProcessIdToSessionId(GetCurrentProcessId(),&session);note("session",session);
-  HANDLE token{};
-  if(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token)){
-    DWORD ac{},n{};GetTokenInformation(token,TokenIsAppContainer,&ac,sizeof(ac),&n);note("appcontainer",ac);
-    BYTE sid[SECURITY_MAX_SID_SIZE]{};DWORD size=sizeof(sid);CreateWellKnownSid(WinRestrictedCodeSid,nullptr,sid,&size);
-    for(auto kind:{TokenGroups,TokenRestrictedSids}){std::vector<BYTE> data(16384);DWORD used{};DWORD rc=0;if(GetTokenInformation(token,kind,data.data(),static_cast<DWORD>(data.size()),&used)){auto*g=reinterpret_cast<TOKEN_GROUPS*>(data.data());for(DWORD i=0;i<g->GroupCount;i++)if(EqualSid(sid,g->Groups[i].Sid))rc|=g->Groups[i].Attributes;}note(kind==TokenGroups?"restricted-code-group":"restricted-code-restricting-sid",rc);}
-    CloseHandle(token);
-  }
-  const auto security=[](HANDLE h,std::vector<BYTE>& out){DWORD info=DACL_SECURITY_INFORMATION,n{};GetUserObjectSecurity(h,&info,nullptr,0,&n);if(!n||n>65536)return false;out.resize(n);return GetUserObjectSecurity(h,&info,out.data(),n,&n)!=FALSE;};
-  HWINSTA original=GetProcessWindowStation();HDESK desktop=GetThreadDesktop(GetCurrentThreadId());
-  std::vector<BYTE> ws,ds;
-  if(!security(original,ws)){note("read-station-dacl-error",GetLastError());return;}
-  if(!security(desktop,ds)){note("read-desktop-dacl-error",GetLastError());return;}
-  PACL wa{},da{};BOOL present{},def{};
-  GetSecurityDescriptorDacl(ws.data(),&present,&wa,&def);GetSecurityDescriptorDacl(ds.data(),&present,&da,&def);
-  SECURITY_DESCRIPTOR wabs{},dabs{};InitializeSecurityDescriptor(&wabs,SECURITY_DESCRIPTOR_REVISION);SetSecurityDescriptorDacl(&wabs,TRUE,wa,FALSE);
-  // Test the minimum missing right on this newly created private station only.
-  HANDLE own_token{};std::vector<BYTE> app_sid(1024);DWORD app_used{};PACL station_acl{};
-  if(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&own_token)){
-    if(GetTokenInformation(own_token,TokenAppContainerSid,app_sid.data(),static_cast<DWORD>(app_sid.size()),&app_used)){
-      auto sid=reinterpret_cast<TOKEN_APPCONTAINER_INFORMATION*>(app_sid.data())->TokenAppContainer;
-      EXPLICIT_ACCESSW add{};add.grfAccessPermissions=WINSTA_CREATEDESKTOP;add.grfAccessMode=GRANT_ACCESS;add.Trustee.TrusteeForm=TRUSTEE_IS_SID;add.Trustee.ptstrName=reinterpret_cast<LPWSTR>(sid);
-      if(SetEntriesInAclW(1,&add,wa,&station_acl)==ERROR_SUCCESS){SetSecurityDescriptorDacl(&wabs,TRUE,station_acl,FALSE);note("private-station-own-package-create-right",1);}
-    }
-    CloseHandle(own_token);
-  }
-  SECURITY_ATTRIBUTES sa{sizeof(sa),&wabs,FALSE};
-  HWINSTA own=CreateWindowStationW(nullptr,0,GENERIC_READ|WINSTA_CREATEDESKTOP,&sa);
-  if(!own&&GetLastError()==ERROR_ACCESS_DENIED)own=CreateWindowStationW(nullptr,0,WINSTA_READATTRIBUTES|WINSTA_CREATEDESKTOP,&sa);
-  const DWORD station_error=own?ERROR_SUCCESS:GetLastError();if(station_acl)LocalFree(station_acl);
-  if(!own){note("create-station-error",station_error);return;}
-  BYTE rc[SECURITY_MAX_SID_SIZE]{};DWORD rcn=sizeof(rc);CreateWellKnownSid(WinRestrictedCodeSid,nullptr,rc,&rcn);
-  EXPLICIT_ACCESSW deny{};deny.grfAccessPermissions=WRITE_DAC|WRITE_OWNER|DELETE|DESKTOP_CREATEMENU|DESKTOP_CREATEWINDOW|DESKTOP_HOOKCONTROL|DESKTOP_JOURNALPLAYBACK|DESKTOP_JOURNALRECORD|DESKTOP_SWITCHDESKTOP;deny.grfAccessMode=DENY_ACCESS;deny.Trustee.TrusteeForm=TRUSTEE_IS_SID;deny.Trustee.ptstrName=reinterpret_cast<LPWSTR>(rc);
-  PACL reduced{};DWORD err=SetEntriesInAclW(1,&deny,da,&reduced);
-  if(err){CloseWindowStation(own);note("desktop-dacl-error",err);return;}
-  InitializeSecurityDescriptor(&dabs,SECURITY_DESCRIPTOR_REVISION);SetSecurityDescriptorDacl(&dabs,TRUE,reduced,FALSE);sa.lpSecurityDescriptor=&dabs;
-  if(!SetProcessWindowStation(own)){err=GetLastError();LocalFree(reduced);CloseWindowStation(own);note("switch-station-error",err);return;}
-  HDESK created=CreateDesktopW(L"OrangeSpace.ContextOnly",nullptr,nullptr,0,DESKTOP_CREATEWINDOW|DESKTOP_READOBJECTS|READ_CONTROL|WRITE_DAC|WRITE_OWNER,&sa);
-  err=created?ERROR_SUCCESS:GetLastError();
-  const BOOL restored=SetProcessWindowStation(original);
-  if(created)CloseDesktop(created);LocalFree(reduced);CloseWindowStation(own);
-  note("create-desktop-error",err);note("station-restored",restored!=FALSE);
-  if(!restored)TerminateProcess(GetCurrentProcess(),25);
 }
 LONG CALLBACK OfflineNativeFailure(EXCEPTION_POINTERS* e) {
   const DWORD native_error=GetLastError();
@@ -153,7 +106,6 @@ CEF_BOOTSTRAP_EXPORT int RunWinMain(HINSTANCE instance, LPWSTR, int,
     return code;
   }
   OfflineEarlyLog("native-authorized-runtime-start\n");
-  WindowFailureContext();
   struct FailureLog {
     PVOID handle=AddVectoredExceptionHandler(1,OfflineNativeFailure);
     ~FailureLog(){if(handle)RemoveVectoredExceptionHandler(handle);}
@@ -223,6 +175,7 @@ CEF_BOOTSTRAP_EXPORT int RunWinMain(HINSTANCE instance, LPWSTR, int,
   settings.log_severity=LOGSEVERITY_DISABLE;
   // Persistent cache remains in this exact OS package, not another sandbox.
   if (!CefInitialize(args, settings, app, sandbox_info)) return 247;
+  OfflineEarlyLog("cef-initialized\n");
   CefRunMessageLoop();
   CefShutdown();
   return 0;

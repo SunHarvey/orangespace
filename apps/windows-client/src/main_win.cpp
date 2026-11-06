@@ -26,23 +26,75 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <utility>
 
 namespace {
 namespace ns = orangespace::node_session;
 namespace sc = orangespace::service_client;
 namespace ps = orangespace::platform_session;
 namespace bs = orangespace::browser_session;
-// The only automatic USER-object exception: the Service's exact derived package
-// SID on this process's current interactive station, WINSTA_CREATEDESKTOP=8.
-// Original DACL retained, read back, and restored only without intervening drift.
+// Chromium opens the noninteractive station named by the Windows logon LUID
+// when it calls CreateWindowStationW with a null name. WinSta0 hosts the UI.
+// Keep the exact noninteractive handle for DACL readback and guarded restore.
 class InstanceStationRight {
+  struct StationHandle {
+    HWINSTA value{};
+    ~StationHandle(){if(value)CloseWindowStation(value);}
+  } station_;
   std::vector<BYTE> before_,after_;
-  static std::vector<BYTE> read() {
+  static HWINSTA open_for_logon(HANDLE browser) {
+    HANDLE token{};
+    if(!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token))throw std::runtime_error("station-token");
+    struct TokenOwner{HANDLE handle;~TokenOwner(){CloseHandle(handle);}} owned{token};
+    HANDLE browser_token{};
+    if(!OpenProcessToken(browser,TOKEN_QUERY,&browser_token))throw std::runtime_error("station-browser-token");
+    TokenOwner browser_owned{browser_token};
+    const auto logon=[](HANDLE source){
+      TOKEN_STATISTICS stats{};DWORD size{};
+      if(!GetTokenInformation(source,TokenStatistics,&stats,sizeof(stats),&size)||size!=sizeof(stats))
+        throw std::runtime_error("station-logon-token");
+      return stats.AuthenticationId;
+    };
+    const auto own_logon=logon(token),browser_logon=logon(browser_token);
+    if(own_logon.HighPart!=browser_logon.HighPart||own_logon.LowPart!=browser_logon.LowPart)
+      throw std::runtime_error("station-logon");
+    wchar_t name[64]{};
+    if(swprintf_s(name,L"Service-0x%lx-%lx$",static_cast<DWORD>(own_logon.HighPart),
+                  own_logon.LowPart)<0)throw std::runtime_error("station-name");
+    constexpr DWORD access=READ_CONTROL|WRITE_DAC|WINSTA_READATTRIBUTES;
+    DWORD bytes{};
+    StationHandle opened{OpenWindowStationW(name,FALSE,access)};
+    if(!opened.value){
+      // Create-only will never replace an existing DACL, including a racing
+      // creator. Use this logon's default token DACL for a fresh station.
+      bytes=0;
+      GetTokenInformation(token,TokenDefaultDacl,nullptr,0,&bytes);
+      if(!bytes||bytes>65536)throw std::runtime_error("station-default-dacl-size");
+      std::vector<BYTE> defaults(bytes);
+      if(!GetTokenInformation(token,TokenDefaultDacl,defaults.data(),bytes,&bytes))
+        throw std::runtime_error("station-default-dacl");
+      const auto default_acl=reinterpret_cast<const TOKEN_DEFAULT_DACL*>(defaults.data())->DefaultDacl;
+      SECURITY_DESCRIPTOR descriptor{};
+      if(!default_acl||!IsValidAcl(default_acl)||!InitializeSecurityDescriptor(&descriptor,SECURITY_DESCRIPTOR_REVISION)||
+         !SetSecurityDescriptorDacl(&descriptor,TRUE,default_acl,FALSE))
+        throw std::runtime_error("station-create-descriptor");
+      SECURITY_ATTRIBUTES attrs{sizeof(SECURITY_ATTRIBUTES),&descriptor,FALSE};
+      opened.value=CreateWindowStationW(nullptr,CWF_CREATE_ONLY,access,&attrs);
+      if(!opened.value&&GetLastError()==ERROR_ALREADY_EXISTS)opened.value=OpenWindowStationW(name,FALSE,access);
+    }
+    USEROBJECTFLAGS flags{};wchar_t actual[64]{};
+    if(!opened.value||opened.value==GetProcessWindowStation()||
+       !GetUserObjectInformationW(opened.value,UOI_FLAGS,&flags,sizeof(flags),&bytes)||(flags.dwFlags&WSF_VISIBLE)||
+       !GetUserObjectInformationW(opened.value,UOI_NAME,actual,sizeof(actual),&bytes)||_wcsicmp(name,actual))
+      throw std::runtime_error("station-noninteractive-logon");
+    return std::exchange(opened.value,nullptr);
+  }
+  static std::vector<BYTE> read(HWINSTA station) {
     SECURITY_INFORMATION info=DACL_SECURITY_INFORMATION;DWORD size{};
-    GetUserObjectSecurity(GetProcessWindowStation(),&info,nullptr,0,&size);
+    GetUserObjectSecurity(station,&info,nullptr,0,&size);
     if(!size || size>65536)throw std::runtime_error("station-descriptor-size");
     std::vector<BYTE> value(size);
-    if(!GetUserObjectSecurity(GetProcessWindowStation(),&info,value.data(),size,&size))throw std::runtime_error("station-read");
+    if(!GetUserObjectSecurity(station,&info,value.data(),size,&size))throw std::runtime_error("station-read");
     return value;
   }
   static PACL acl(const std::vector<BYTE>& value) {
@@ -63,7 +115,7 @@ class InstanceStationRight {
   }
  public:
   bool active() const noexcept {return !before_.empty();}
-  void grant(const bs::State& state) {
+  void grant(const bs::State& state,HANDLE browser) {
     if(active())throw std::runtime_error("station-already-owned");
     auto session=sc::current_interactive_session();if(!session)throw std::runtime_error("station-session");
     PSID derived{},claimed{};
@@ -72,32 +124,40 @@ class InstanceStationRight {
     if(!ConvertStringSidToSidW(orangespace::widen(state.package_sid).c_str(),&claimed))throw std::runtime_error("station-sid");
     struct LocalOwner{PSID p;~LocalOwner(){if(p)LocalFree(p);}} claim{claimed};
     if(!EqualSid(derived,claimed))throw std::runtime_error("station-sid-mismatch");
-    auto before=read();const auto old=acl(before);
-    const DWORD length=old->AclSize+sizeof(ACCESS_ALLOWED_ACE)-sizeof(DWORD)+GetLengthSid(derived);
+    StationHandle opened{open_for_logon(browser)};
+    auto before=read(opened.value);const auto old=acl(before);
+    ACL_SIZE_INFORMATION usage{};
+    if(!GetAclInformation(old,&usage,sizeof(usage),AclSizeInformation))throw std::runtime_error("station-acl-info");
+    const DWORD length=usage.AclBytesInUse+sizeof(ACCESS_ALLOWED_ACE)-sizeof(DWORD)+GetLengthSid(derived);
     if(length>65535)throw std::runtime_error("station-acl-size");
     std::vector<BYTE> next(length);auto target=reinterpret_cast<PACL>(next.data());
-    if(!InitializeAcl(target,length,ACL_REVISION))throw std::runtime_error("station-acl-init");
-    for(DWORD i=0;i<old->AceCount;++i) {void* ace{};if(!GetAce(old,i,&ace) || !AddAce(target,ACL_REVISION,MAXDWORD,ace,static_cast<ACE_HEADER*>(ace)->AceSize))throw std::runtime_error("station-ace-copy");}
-    if(!AddAccessAllowedAceEx(target,ACL_REVISION,0,WINSTA_CREATEDESKTOP,derived))throw std::runtime_error("station-ace");
+    if(!InitializeAcl(target,length,old->AclRevision))throw std::runtime_error("station-acl-init");
+    for(DWORD i=0;i<old->AceCount;++i) {void* ace{};if(!GetAce(old,i,&ace) || !AddAce(target,old->AclRevision,MAXDWORD,ace,static_cast<ACE_HEADER*>(ace)->AceSize))throw std::runtime_error("station-ace-copy");}
+    constexpr DWORD rights=WINSTA_READATTRIBUTES|WINSTA_CREATEDESKTOP;
+    if(!AddAccessAllowedAceEx(target,old->AclRevision,0,rights,derived))throw std::runtime_error("station-ace");
     SECURITY_DESCRIPTOR descriptor{};InitializeSecurityDescriptor(&descriptor,SECURITY_DESCRIPTOR_REVISION);
     if(!SetSecurityDescriptorDacl(&descriptor,TRUE,target,FALSE))throw std::runtime_error("station-descriptor");
     // Allocate original + expected descriptors before changing external state.
     std::vector<BYTE> after(65536);DWORD relative_size=static_cast<DWORD>(after.size());
     if(!MakeSelfRelativeSD(&descriptor,after.data(),&relative_size))throw std::runtime_error("station-relative");
-    before_=std::move(before);after_=std::move(after);
     SECURITY_INFORMATION info=DACL_SECURITY_INFORMATION;
-    if(!SetUserObjectSecurity(GetProcessWindowStation(),&info,&descriptor)){before_.clear();after_.clear();throw std::runtime_error("station-set");}
-    const auto observed=read();
-    const auto actual=acl(observed);
-    if(actual->AceCount!=target->AceCount)throw std::runtime_error("station-readback-count");
-    for(DWORD i=0;i<target->AceCount;++i){void* x{};void* y{};if(!GetAce(target,i,&x)||!GetAce(actual,i,&y)||static_cast<ACE_HEADER*>(x)->AceSize!=static_cast<ACE_HEADER*>(y)->AceSize||std::memcmp(x,y,static_cast<ACE_HEADER*>(x)->AceSize))throw std::runtime_error("station-readback-ace");}
+    if(!same(read(opened.value),before))throw std::runtime_error("station-drift-before-grant");
+    if(!SetUserObjectSecurity(opened.value,&info,&descriptor))throw std::runtime_error("station-set");
+    station_.value=std::exchange(opened.value,nullptr);
+    before_=std::move(before);after_=std::move(after);
+    if(!same(read(station_.value),after_))throw std::runtime_error("station-readback");
   }
   bool restore() noexcept {
     if(!active())return true;
     try {
-      if(!same(read(),after_))return false;
-      SECURITY_INFORMATION info=DACL_SECURITY_INFORMATION;
-      if(!SetUserObjectSecurity(GetProcessWindowStation(),&info,before_.data()) || !same(read(),before_))return false;
+      auto observed=read(station_.value);
+      if(!same(observed,before_)){
+        if(!same(observed,after_))return false;
+        SECURITY_INFORMATION info=DACL_SECURITY_INFORMATION;
+        if(!SetUserObjectSecurity(station_.value,&info,before_.data())||!same(read(station_.value),before_))return false;
+      }
+      if(!CloseWindowStation(station_.value))return false;
+      station_.value=nullptr;
       before_.clear();after_.clear();return true;
     } catch (...) {return false;}
   }
@@ -990,7 +1050,7 @@ class Application {
           if(state.phase==bs::Phase::awaiting_desktop && !station_ready_) {
             try {
               if(!retain_browser_process(state))throw std::runtime_error("browser-identity");
-              station_.grant(state);station_ready_=true;
+              station_.grant(state,browser_process_);station_ready_=true;
               browser_command_=bs::Command::station_configured;browser_command_owner_=i->second;
             } catch (...) {
               browser_command_=bs::Command::close;browser_command_owner_=i->second;

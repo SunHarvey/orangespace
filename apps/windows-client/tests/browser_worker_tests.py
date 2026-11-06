@@ -35,7 +35,7 @@ struct App {
  std::thread browser_worker_;std::shared_ptr<BrowserMailbox> browser_mailbox_;
  std::optional<bs::Command> browser_command_;std::shared_ptr<TunnelLease> browser_command_owner_;
  std::chrono::steady_clock::time_point next_browser_{};
- struct Station{int count=0;void grant(const bs::State&){++count;}bool active() const{return count>0;}}station_;
+ struct Station{int count=0;void grant(const bs::State&,bool){++count;}bool active() const{return count>0;}}station_;
  void browser_view(){} bool retain_browser_process(const bs::State&){return true;}
  static bool browser_closed(const bs::State& s){return s.phase==bs::Phase::closed&&s.process_id==0;}
  bool browser_retired(const bs::State& s) const{return s.process_id&&s.process_id==retired_pid_;}
