@@ -1,4 +1,7 @@
 // Included inside chain_windows.cpp's protected Windows implementation namespace.
+inline void mark_platform_authorization(const wchar_t** phase,const wchar_t* label) noexcept {
+  if(phase)*phase=label;
+}
 // Bounded, exact exchange cleanup ownership. Failed cleanup is retained, never
 // reported as success; retried on the next platform authorization (64 slots).
 struct PlatformReceipt {
@@ -68,21 +71,27 @@ public:
     local_alias_=catalog_->federation_node(selected_.node_id).name;
   }
   ~PlatformNode() override {receipt_->abandon();}
-  void initialize() {
+  void initialize(const wchar_t** phase=nullptr) {
+    mark_platform_authorization(phase,L"platform-auth-center-node-check");
     central_check();
+    mark_platform_authorization(phase,L"platform-auth-center-exchange-issue");
     receipt_->ticket.emplace(central_.issue(selected_.node_id));
     Text body;
     body.value="{\"schema\":1,\"exchange_id\":"+quote(receipt_->ticket->exchange_id)+",\"exchange_token\":"+quote(receipt_->ticket->exchange_token.view())+"}";
     receipt_->submitted=true; // before possibly submitting; unknown result retains cleanup
+    mark_platform_authorization(phase,L"platform-auth-node-exchange");
     catalog_->federation_exchange(selected_.node_id,body.value,false,[&](std::string_view bytes){
+      mark_platform_authorization(phase,L"platform-auth-node-exchange-response");
       detail::exact_wire_integers(bytes);detail::JsonGuard doc(bytes);
       const auto expiry=platform::validate_exchange(doc.value,central_.identity(),selected_,chain_now());
       const auto& credential=detail::field(doc.value,"node_credential");
       // Never rewrite an issued envelope to manufacture a catalog match. Origin
       // was checked exactly against Centre and equivalently against static pins.
+      mark_platform_authorization(phase,L"platform-auth-node-identity");
       node_.reset(new node_session::NodeSession(node_session::NodeSession::restore(*catalog_,local_alias_,detail::text(detail::field(credential,"access_token")))));
       detail::require(node_->identity().user_id==selected_.remote_legacy_user_id&&node_->identity().node_id==selected_.node_id&&node_->expires_at()==expiry);
     });
+    mark_platform_authorization(phase,L"platform-auth-center-node-recheck");
     central_check();
   }
   Identity identity() const override {

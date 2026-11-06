@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -107,8 +108,17 @@ std::int64_t now() {
       std::chrono::system_clock::now().time_since_epoch()).count();
 }
 enum Control : int { TrustPath = 100, LoadTrust, Alias, Username, Password, Login, Logout,
-  Refresh, SandboxList, Name, Create, Bind, Open, Close, Delete, Connect, Stop, Remember, AddTab, Files, Menu, BackToBrowser, Navigate, BrowserBack, BrowserForward, BrowserReload };
+  Refresh, SandboxList, Name, Create, Bind, Open, Close, Delete, Connect, Stop, Remember, AddTab, Files, Menu, BackToBrowser };
 enum class Job { catalog, login, broker, tunnel, open_node };
+enum class TunnelStartStage { none, authorize, register_sandbox, start_tunnel };
+const wchar_t* tunnel_start_failure(TunnelStartStage stage) noexcept {
+  switch(stage) {
+    case TunnelStartStage::authorize: return L"受保护服务授权未完成。请检查节点授权和服务连接。";
+    case TunnelStartStage::register_sandbox: return L"受保护服务未能注册此沙盒。";
+    case TunnelStartStage::start_tunnel: return L"节点隧道启动未完成。请检查节点可用性后重试。";
+    default: return L"连接未完成。请检查沙盒状态和受保护服务。";
+  }
+}
 // Grant ownership begins at authorization completion, including stale results.
 // No destructor starts detached work: the application drain awaits all owners.
 struct TunnelLease {
@@ -142,6 +152,7 @@ struct StatusMailbox {
 };
 struct Completion {
   Job job{};
+  TunnelStartStage tunnel_start_stage{};
   std::uint64_t generation{};
   Auth::LoginTicket login{};
   Auth::Operation operation{};
@@ -299,21 +310,11 @@ class Application {
     list_=control(WC_LISTVIEWW,L"",LVS_SINGLESEL,SandboxList);
     name_label_=label(L""); name_=edit(Name,80); create_=button(L"",Create);
     node_label_=label(L""); node_=label(L""); bind_=button(L"",Bind);
-    open_=button(L"",Open); connect_=button(L"",Connect); stop_=button(L"",Stop);
+    open_=button(L"",Open); connect_=button(L"重新连接",Connect); stop_=button(L"",Stop);
     close_=button(L"关闭标签",Close); delete_=button(L"删除沙盒",Delete);
     detail_=label(L""); files_=label(L""); notice_=label(L"正在读取受保护配置…");
     add_=button(L"＋",AddTab); file_button_=button(L"文件",Files); menu_=button(L"···",Menu);
-    address_=edit(Navigate,2048);
-    SendMessageW(address_,EM_SETCUEBANNER,TRUE,reinterpret_cast<LPARAM>(L"输入 HTTPS 或 HTTP 网址"));
-    SetWindowSubclass(address_,[](HWND h,UINT m,WPARAM w,LPARAM l,UINT_PTR,DWORD_PTR owner)->LRESULT {
-      if(m==WM_GETDLGCODE)return DLGC_WANTALLKEYS;
-      if(m==WM_KEYDOWN && w==VK_RETURN){SendMessageW(reinterpret_cast<HWND>(owner),WM_COMMAND,MAKEWPARAM(Navigate,BN_CLICKED),0);return 0;}
-      return DefSubclassProc(h,m,w,l);
-    },1,reinterpret_cast<DWORD_PTR>(window));
-    back_=button(L"←",BrowserBack);forward_=button(L"→",BrowserForward);reload_=button(L"↻",BrowserReload);
-    browser_host_=control(L"STATIC",L"",SS_BLACKRECT);ShowWindow(browser_host_,SW_HIDE);
-    for(auto h:{address_,back_,forward_,reload_})EnableWindow(h,FALSE);
-    return_=button(L"返回浏览器",BackToBrowser);
+    return_=button(L"返回沙盒",BackToBrowser);
     sync_identity(); layout();
   }
   void load_automatic_config() {
@@ -334,7 +335,7 @@ class Application {
     const int h=MulDiv(r.bottom,96,static_cast<int>(GetDpiForWindow(window)));
     for(auto control:{trust_label_,trust_,load_,alias_label_,alias_,username_label_,username_,password_label_,password_,
       remember_,login_,logout_,identity_,refresh_,list_,name_label_,name_,create_,node_label_,node_,bind_,open_,connect_,stop_,
-      close_,delete_,detail_,files_,add_,file_button_,menu_,address_,back_,forward_,reload_,return_})ShowWindow(control,SW_HIDE);
+      close_,delete_,detail_,files_,add_,file_button_,menu_,return_})ShowWindow(control,SW_HIDE);
     for(auto c:node_buttons_)ShowWindow(c,SW_HIDE);
     for(auto c:node_menus_)ShowWindow(c,SW_HIDE);
     for(auto c:tab_buttons_)ShowWindow(c,SW_HIDE);
@@ -366,12 +367,12 @@ class Application {
         int tx=12;const int tw=std::min(230,std::max(100,(w-100)/std::max(1,static_cast<int>(tabs_.size()))));
         for(std::size_t i=0;i<tab_buttons_.size();++i){show(tab_buttons_[i],tx,10,tw-28,38);show(tab_closes_[i],tx+tw-28,10,28,38);tx+=tw+4;}
         show(add_,std::min(tx,w-60),10,42,38);
-        show(back_,12,64,32,32);show(forward_,48,64,32,32);show(reload_,84,64,32,32);
-        show(address_,126,64,w-460,34);show(node_,w-324,68,170,32);
+        show(node_,12,68,w-170,32);
         show(file_button_,w-146,64,80,34);show(menu_,w-58,64,44,34);
         ShowWindow(identity_,SW_HIDE);ShowWindow(logout_,SW_HIDE);
         show(close_,12,h-48,110,30);show(notice_,138,h-48,w-155,42);
         show(detail_,std::max(30,(w-580)/2),std::max(170,h/2),580,100);
+        place(connect_,std::max(12,(w-132)/2),std::max(170,h/2)+106,132,38);
         if(file_view_ && file_panel_) {
           ShowWindow(detail_,SW_HIDE);show(return_,16,112,130,32);
           MoveWindow(file_panel_->window(),px(12),px(154),px(w-24),px(std::max(0,h-210)),TRUE);
@@ -495,7 +496,7 @@ class Application {
     const bool enabled=!busy_ && !draining_ && !closing_;
     for(auto h:{trust_,load_,alias_,username_,password_})EnableWindow(h,enabled);
     EnableWindow(login_,enabled && !s && !logout_state_.restore_blocked() && catalog_);
-    for(auto h:{refresh_,name_,create_,bind_,close_,delete_,connect_})EnableWindow(h,enabled && authorized);
+    for(auto h:{refresh_,name_,create_,bind_,close_,delete_})EnableWindow(h,enabled && authorized);
     EnableWindow(list_,!draining_ && !closing_ && authorized);
     auto selected=selection();
     EnableWindow(stop_,!draining_ && !closing_ && selected &&
@@ -628,10 +629,6 @@ class Application {
     }
   }
   void command(int id) {
-    if(id==Navigate){queue_browser(bs::Command::navigate,orangespace::narrow(text(address_)));return;}
-    if(id==BrowserBack){queue_browser(bs::Command::back);return;}
-    if(id==BrowserForward){queue_browser(bs::Command::forward);return;}
-    if(id==BrowserReload){queue_browser(bs::Command::reload);return;}
     if(id>=3000 && id<4000) {
       const auto i=static_cast<std::size_t>(id-3000);if(!busy_ && i<tabs_.size()) {active_sandbox_=tabs_[i];command(Close);}return;
     }
@@ -726,6 +723,8 @@ class Application {
       // OSP3 Prototype deliberately rejects OSP1 foundation probes. The real
       // worker's SCM/retained-process/pipe authentication is the admission path.
       if(!browser_enabled(selected->node_id)){notice(L"此节点已获授权，浏览暂不可用。");return;}
+      if(browser_process_ || station_.active() ||
+         (!tunnels_.empty() && !browser_retry_available()))return;
       const auto admitted_at=now();
       auto session=auth_.retain(admitted_at);
       const auto* destination=auth_.node(selected->node_id,admitted_at);
@@ -744,18 +743,27 @@ class Application {
       start([grant,local,op,node=std::move(node),session,row_ticket,old=std::move(old)](Completion& out,Mailbox& box) mutable {
         out.tunnel=old;out.job=Job::tunnel;out.operation=op;out.local_sandbox=local;out.row_ticket=row_ticket;
         if(box.cancelled || now()>=op.expiry){out.failed=true;return;}
+        if(old) {
+          const auto state=bs::exchange(*old->grant,old->binding,bs::Command::status);
+          if(!browser_closed(state))throw std::runtime_error("browser close not confirmed");
+        }
         auto lease=std::make_shared<TunnelLease>();lease->local=local;
         if(!grant) {
           orangespace::ui_lifecycle::SharedReturnSlot<sc::Grant> owner;
+          out.tunnel_start_stage=TunnelStartStage::authorize;
           out.grant=std::move(owner).adopt(sc::authorize_platform(*session,node));
+          out.tunnel_start_stage=TunnelStartStage::none;
           grant=out.grant;
         }
         lease->grant=grant;
         if(box.cancelled || now()>=op.expiry){out.failed=true;return;}
         // Service ledger, not SQLite/UI generations, owns the durable cursor.
+        out.tunnel_start_stage=TunnelStartStage::register_sandbox;
         out.cursor=sc::register_sandbox(*grant,local);
         static_assert(std::is_nothrow_move_assignable_v<decltype(lease->binding)>);
+        out.tunnel_start_stage=TunnelStartStage::start_tunnel;
         lease->binding=sc::start_registered_tunnel(*grant,local);
+        out.tunnel_start_stage=TunnelStartStage::none;
         // Typed return validates all three proofs. Publish exact cleanup owner
         // before any fallible Cursor/string construction or cancellation check.
         out.tunnel=std::move(lease);old.reset();
@@ -904,6 +912,27 @@ class Application {
     (void)node;return false;
 #endif
   }
+  static bool browser_closed(const bs::State& state) {
+    return state.phase==bs::Phase::closed && state.process_id==0;
+  }
+  bool browser_retired(const bs::State& state) const {
+    return state.process_id!=0 && state.process_id==retired_browser_pid_ &&
+      state.process_birth==retired_browser_birth_;
+  }
+  bool browser_retry_available() const {
+    if(busy_ || draining_ || closing_ || file_view_ || choosing_node_ ||
+       tabs_.empty() || browser_process_ || station_.active() ||
+       !auth_.active(now()) || logout_state_.restore_blocked())return false;
+    auto row=selection();
+    if(!row || !browser_enabled(row->node_id) || !auth_.manage(row->user_id,row->node_id,now()) ||
+       row->id==starting_local_ || std::any_of(pending_stops_.begin(),pending_stops_.end(),
+         [&](const auto& lease){return lease->local==row->id;}))return false;
+    const auto i=tunnels_.find(row->id);
+    if(i==tunnels_.end())return tunnels_.empty();
+    const auto& lease=*i->second;
+    return lease.browser && browser_closed(*lease.browser) &&
+      std::chrono::steady_clock::now()-lease.browser_at<std::chrono::seconds(5);
+  }
   bool retain_browser_process(const bs::State& state) {
     if(browser_process_)return browser_pid_==state.process_id && browser_birth_==state.process_birth && WaitForSingleObject(browser_process_,0)==WAIT_TIMEOUT;
     HANDLE process=OpenProcess(SYNCHRONIZE|PROCESS_QUERY_LIMITED_INFORMATION,FALSE,state.process_id);
@@ -929,58 +958,20 @@ class Application {
     PSID claimed{};if(!ConvertStringSidToSidW(orangespace::widen(state.package_sid).c_str(),&claimed))return false;
     const bool match=sid && EqualSid(sid,claimed);LocalFree(claimed);if(!match)return false;
     browser_process_=process;guard.p=nullptr;browser_pid_=state.process_id;browser_birth_=state.process_birth;
-    embed_until_=std::chrono::steady_clock::now()+std::chrono::seconds(15);return true;
+    return true;
   }
   void browser_view() {
     if(browser_process_ && WaitForSingleObject(browser_process_,0)==WAIT_OBJECT_0) {
-      if(!station_.restore()){notice(L"浏览器已退出；桌面权限恢复未确认，停止重新打开。");return;}
-      CloseHandle(browser_process_);browser_process_=nullptr;browser_hwnd_=nullptr;browser_pid_=0;browser_birth_=0;station_ready_=false;embed_failed_=false;
-    }
-    auto i=tunnels_.find(active_sandbox_);
-    const auto* state=i!=tunnels_.end() && i->second->browser ? &*i->second->browser : nullptr;
-    const bool fresh=state && std::chrono::steady_clock::now()-i->second->browser_at<std::chrono::seconds(5);
-    const bool running=fresh && state->phase==bs::Phase::running && !draining_ && !closing_;
-    if(running && !browser_hwnd_ && !embed_failed_) {
-      if(!retain_browser_process(*state)) {embed_failed_=true;notice(L"浏览器进程身份核验失败；未嵌入窗口。");}
+      retired_browser_pid_=browser_pid_;retired_browser_birth_=browser_birth_;
+      if(!station_.restore())notice(L"浏览器已退出；正在确认桌面权限恢复。");
       else {
-        struct Search{DWORD pid;HWND found;};Search search{browser_pid_,nullptr};
-        EnumWindows([](HWND h,LPARAM p)->BOOL {
-          auto& value=*reinterpret_cast<Search*>(p);DWORD pid{};GetWindowThreadProcessId(h,&pid);
-          if(pid==value.pid && IsWindowVisible(h) && !GetWindow(h,GW_OWNER) && GetAncestor(h,GA_ROOT)==h){value.found=h;return FALSE;}return TRUE;
-        },reinterpret_cast<LPARAM>(&search));
-        if(search.found) {
-          SetLastError(ERROR_SUCCESS);const auto previous=SetParent(search.found,browser_host_);const auto error=GetLastError();
-          if(!previous && error!=ERROR_SUCCESS){embed_failed_=true;notice(L"SetParent 失败；无法内嵌真实浏览器。");}
-          else {
-            const auto style=GetWindowLongPtrW(search.found,GWL_STYLE);
-            SetLastError(ERROR_SUCCESS);SetWindowLongPtrW(search.found,GWL_STYLE,(style&~(WS_POPUP|WS_CAPTION|WS_THICKFRAME))|WS_CHILD);
-            if(GetLastError()!=ERROR_SUCCESS){embed_failed_=true;ShowWindow(search.found,SW_HIDE);notice(L"浏览器子窗口样式设置失败。");}
-            else {browser_hwnd_=search.found;SetWindowPos(browser_hwnd_,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_FRAMECHANGED);}
-          }
-        } else if(std::chrono::steady_clock::now()>=embed_until_){embed_failed_=true;notice(L"浏览器窗口创建超时；未显示替代网页。");}
+        CloseHandle(browser_process_);browser_process_=nullptr;browser_pid_=0;browser_birth_=0;station_ready_=false;
+        if(!closing_ && !draining_ && tunnels_.contains(active_sandbox_))
+          notice(L"浏览器已退出；清理完成后可重新连接。");
       }
     }
-    const bool visible=running && browser_hwnd_ && !embed_failed_ && !file_view_ && !choosing_node_ && !tabs_.empty();
-    RECT area{};GetClientRect(window,&area);
-    MoveWindow(browser_host_,px(12),px(110),std::max<LONG>(0,area.right-px(24)),std::max<LONG>(0,area.bottom-px(170)),TRUE);
-    ShowWindow(browser_host_,visible?SW_SHOW:SW_HIDE);
-    if(browser_hwnd_) {
-      DWORD owner{};GetWindowThreadProcessId(browser_hwnd_,&owner);
-      if(owner==browser_pid_ && browser_process_ && WaitForSingleObject(browser_process_,0)==WAIT_TIMEOUT) {
-        RECT box{};GetClientRect(browser_host_,&box);MoveWindow(browser_hwnd_,0,0,box.right,box.bottom,TRUE);
-        ShowWindow(browser_hwnd_,visible?SW_SHOW:SW_HIDE);
-      }
-    }
-    EnableWindow(address_,running && !file_view_);EnableWindow(reload_,running && !file_view_);
-    EnableWindow(back_,running && !file_view_ && state->can_go_back);EnableWindow(forward_,running && !file_view_ && state->can_go_forward);
-    if(visible)ShowWindow(detail_,SW_HIDE);
-  }
-  void queue_browser(bs::Command command,std::string url={}) {
-    if(draining_ || closing_ || busy_)return;
-    const auto i=tunnels_.find(active_sandbox_);if(i==tunnels_.end() || !browser_enabled(i->second->binding.node))return;
-    if(command==bs::Command::navigate && !sc::valid_browser_url(url)){notice(L"请输入有效的 HTTP 或 HTTPS 网址。");return;}
-    if(browser_command_){notice(L"上一条浏览操作仍在处理中。");return;}
-    browser_command_=command;browser_url_=std::move(url);browser_command_owner_=i->second;
+    const bool can_retry=browser_retry_available();
+    EnableWindow(connect_,can_retry);ShowWindow(connect_,can_retry?SW_SHOW:SW_HIDE);
   }
   void poll_browser() {
     browser_view();
@@ -988,11 +979,14 @@ class Application {
       auto box=browser_mailbox_;bool done{};{std::lock_guard lock(box->mutex);done=box->done;}if(!done)return;
       if(browser_worker_.joinable())browser_worker_.join();
       const auto i=tunnels_.find(box->lease->local);
-      if(!draining_ && !closing_ && generation_==box->generation && i!=tunnels_.end() && i->second==box->lease) {
+      if(!draining_ && !closing_ && generation_==box->generation && i!=tunnels_.end() && i->second==box->lease &&
+         (!box->state || !browser_retired(*box->state))) {
+        const auto& previous=i->second->browser;
+        const bool was_closed=previous && browser_closed(*previous);
+        const bool was_running=previous && previous->phase==bs::Phase::running;
         i->second->browser=std::move(box->state);i->second->browser_at=box->requested;
         if(i->second->browser) {
           const auto& state=*i->second->browser;
-          if(GetFocus()!=address_)SetWindowTextW(address_,orangespace::widen(state.url).c_str());
           if(state.phase==bs::Phase::awaiting_desktop && !station_ready_) {
             try {
               if(!retain_browser_process(state))throw std::runtime_error("browser-identity");
@@ -1003,7 +997,11 @@ class Application {
               notice(L"当前桌面的实例权限设置失败；关闭该实例，不扩大权限。");
             }
           }
+          if(state.phase==bs::Phase::running && !was_running)
+            notice(L"浏览器已在独立窗口打开。");
           if(state.phase==bs::Phase::failed)notice(L"浏览会话失败；不会切换到直连网络。");
+          if(!was_closed && browser_closed(state) && !browser_process_ && !station_.active())
+            notice(L"浏览器已停止；可重新连接。");
         } else notice(L"浏览状态未知；服务通信或授权未确认。");
       }
       browser_mailbox_.reset();browser_view();return;
@@ -1013,12 +1011,11 @@ class Application {
     auto i=tunnels_.find(active_sandbox_);if(i==tunnels_.end() || !browser_enabled(i->second->binding.node))return;
     auto box=std::make_shared<BrowserMailbox>();box->lease=i->second;box->generation=generation_;box->requested=stamp;
     const auto command=browser_command_ && browser_command_owner_==box->lease ? *browser_command_ : bs::Command::status;
-    auto url=command==bs::Command::navigate?browser_url_:std::string{};
-    browser_worker_=std::thread([box,command,url=std::move(url)] {
-      try {box->state=bs::exchange(*box->lease->grant,box->lease->binding,command,url);}catch (...) {}
+    browser_worker_=std::thread([box,command] {
+      try {box->state=bs::exchange(*box->lease->grant,box->lease->binding,command);}catch (...) {}
       std::lock_guard lock(box->mutex);box->done=true;
     });
-    browser_command_.reset();browser_command_owner_.reset();browser_url_.clear();
+    browser_command_.reset();browser_command_owner_.reset();
     browser_mailbox_=std::move(box);next_browser_=stamp+std::chrono::milliseconds(500);
   }
   void poll_status() {
@@ -1064,7 +1061,10 @@ class Application {
       box->prior_expiry=box->lease->diagnostic->server_expiry;
       box->prior_observed=box->lease->diagnostic->observed_at_ms;
     }
-    status_worker_=std::thread([box] {
+    // An active forwarding probe can hold the runtime slot longer than a
+    // browser heartbeat. The Service still verifies forwarding during startup.
+    const bool probe_forwarding=!browser_enabled(box->binding.node);
+    status_worker_=std::thread([box,probe_forwarding] {
       bool known=false,live=false;
       try {
         const auto active=sc::active_tunnels(*box->lease->grant);
@@ -1076,7 +1076,7 @@ class Application {
         known=true;
       } catch (...) {} // Unreachable/invalid/expired authority is unknown, not cached success.
       // Diagnostic failure is independent from the local permit observation.
-      if(known && live)try {
+      if(known && live && probe_forwarding)try {
         auto diagnostic=sc::diagnose_tunnel(*box->lease->grant,box->binding);
         if(same_binding(diagnostic.binding,box->binding))box->diagnostic=std::move(diagnostic);
       } catch (...) {}
@@ -1137,6 +1137,8 @@ class Application {
         if(out->job==Job::tunnel) {
           rows_.complete(out->row_ticket,false,false,false);
           if(!out->tunnel && rows_.state(out->local_sandbox)==orangespace::PlatformRows::State::stopping)rows_.stopped(out->local_sandbox);
+          notice(tunnel_start_failure(out->tunnel_start_stage),true);
+          sync_identity();return;
         }
         notice(out->job==Job::catalog
           ? L"platform.json 载入失败：请检查绝对路径、管理员保护 ACL 和中心 HTTPS 配置。不会使用旧 Node 登录。"
@@ -1173,7 +1175,7 @@ class Application {
         std::erase(pending_stops_,out->tunnel);
         out->tunnel.reset();
         rows_.complete(out->row_ticket,true,true,true); // Only after validated typed Service return.
-        next_browser_={};notice(L"节点隧道已验证；正在等待 Service 完成浏览器防护与启动。");
+        next_browser_={};notice(L"节点隧道已验证；正在等待受保护的浏览器启动。");
       } else if(out->job==Job::open_node && auth_.current(out->operation,now())) {
         open_pending_=false;sandboxes_=std::move(out->sandboxes);active_sandbox_=out->local_sandbox;
         const bool already_open=std::find(tabs_.begin(),tabs_.end(),active_sandbox_)!=tabs_.end();
@@ -1375,13 +1377,14 @@ class Application {
   HWND trust_label_{}, trust_{}, load_{}, alias_label_{}, alias_{}, username_label_{}, username_{}, password_label_{}, password_{},
       login_{}, logout_{}, identity_{}, refresh_{}, list_{}, name_label_{}, name_{}, create_{}, node_label_{}, node_{},
       bind_{}, open_{}, connect_{}, stop_{}, close_{}, delete_{}, detail_{}, files_{}, notice_{};
-  HWND remember_{},add_{},file_button_{},menu_{},address_{},back_{},forward_{},reload_{},return_{},browser_host_{},browser_hwnd_{};
+  HWND remember_{},add_{},file_button_{},menu_{},return_{};
   HANDLE browser_process_{};DWORD browser_pid_{};std::uint64_t browser_birth_{};
-  InstanceStationRight station_;bool station_ready_{},embed_failed_{};
+  DWORD retired_browser_pid_{};std::uint64_t retired_browser_birth_{};
+  InstanceStationRight station_;bool station_ready_{};
   std::thread browser_worker_;std::shared_ptr<BrowserMailbox> browser_mailbox_;
-  std::optional<bs::Command> browser_command_;std::string browser_url_;
+  std::optional<bs::Command> browser_command_;
   std::shared_ptr<TunnelLease> browser_command_owner_;
-  std::chrono::steady_clock::time_point next_browser_{},embed_until_{};
+  std::chrono::steady_clock::time_point next_browser_{};
   std::vector<HWND> node_buttons_,node_menus_,tab_buttons_,tab_closes_;
   std::map<std::pair<std::string,std::string>,std::shared_ptr<std::string>> default_candidates_;
   std::vector<std::string> tabs_;

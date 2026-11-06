@@ -36,16 +36,18 @@ class Concurrency(unittest.TestCase):
 using namespace std::chrono_literals;
 namespace p=orangespace::prototype;
 using HANDLE=unsigned;using DWORD=unsigned;using ULONG=unsigned;using BYTE=unsigned char;using ULONGLONG=unsigned long long;
-constexpr unsigned WAIT_TIMEOUT=258,WAIT_OBJECT_0=0,ERROR_INVALID_DATA=13;
+constexpr unsigned WAIT_TIMEOUT=258,WAIT_OBJECT_0=0,ERROR_INVALID_DATA=13,FALSE=0;
 struct Failure{unsigned code;};void need(bool b){if(!b)throw Failure{13};}
 struct Handle{unsigned h=1;unsigned get()const{return h;}};
 thread_local const char*stage="test";thread_local unsigned who=0;thread_local unsigned local_proofs=0;
 std::atomic<bool>stopped=false;std::atomic<unsigned>kills=0,commits=0,proofs=0;
 std::mutex seam;std::condition_variable cv;bool entered=false,released=false;
 int fault=0;unsigned stop_event=1;
+std::atomic<unsigned>service_stop_event{9};
 unsigned GetTickCount64(){return 0;}void report_fixed(const char*,unsigned){}
 void SetEvent(unsigned){stopped=true;}void TerminateJobObject(unsigned,unsigned){++kills;}
 unsigned WaitForSingleObject(unsigned,unsigned ms){return stopped||ms==200?0:WAIT_TIMEOUT;}
+unsigned WaitForMultipleObjects(unsigned,const HANDLE*,unsigned,unsigned){assert(false);return WAIT_TIMEOUT;}
 bool live(unsigned){return true;}unsigned long long birth(unsigned h){return h+100;}
 unsigned GetProcessId(unsigned h){return h;}
 bool GetNamedPipeClientProcessId(unsigned h,unsigned*p){*p=h;who=h;return true;}
@@ -63,7 +65,13 @@ struct LocalChannel {
  long long proof_observed_at_ms{};unsigned short port{};
 } local_channel;
 auto*channel=&local_channel;
-struct Control {void verify_live(const LocalChannel&){assert(false&&"Root-private branch is outside child fixture coverage");}}control;
+struct Control {
+ void verify_live(const LocalChannel&){assert(false&&"Root-private branch is outside child fixture coverage");}
+ long long fresh_forwarding_proof(const LocalChannel&){assert(false);return 0;}
+ p::BrowserFrame next_command(){assert(false);return {};}
+ void observe(const p::BrowserFrame&){assert(false);}
+}control;
+void diagnose_private_offer(const p::PrivateOffer&,long long){assert(false);}
 using BCRYPT_ALG_HANDLE=void*;using PUCHAR=unsigned char*;
 constexpr unsigned BCRYPT_USE_SYSTEM_PREFERRED_RNG=2;
 constexpr auto BCRYPT_SHA256_ALGORITHM=L"SHA256";
@@ -137,7 +145,7 @@ int main(int argc,char**argv){
         self.assertLess(main.index('p::FreshRuleInspection inspections('),main.index('struct Join {'))
         self.assertIn('join{workers,root,inspections}',main)
         join=main.split('struct Join {',1)[1].split('join{workers,root,inspections}',1)[0]
-        self.assertLess(join.index('t.join()'),join.index('inspections.stop()'))
+        self.assertLess(join.index('t.thread.join()'),join.index('inspections.stop()'))
 
     def test_wfp_restored_single_engine(self):
         body=WFP.split('NetworkPolicy::verifyExactPolicy(',1)[1].split('void NetworkPolicy::cleanupAfterExactTreeExit',1)[0]
@@ -155,7 +163,7 @@ int main(int argc,char**argv){
                       'ImpersonateNamedPipeClient(pipe)', 'pipepeer.logon==actual.logon']:
             self.assertIn(check,peer)
         join=SOURCE.split('struct Join {',1)[1].split('join{workers,root,inspections}',1)[0]
-        self.assertLess(join.index('SetEvent(stop_event)'),join.index('t.join()'))
-        self.assertLess(join.index('TerminateJobObject('),join.index('t.join()'))
+        self.assertLess(join.index('SetEvent(stop_event)'),join.index('t.thread.join()'))
+        self.assertLess(join.index('TerminateJobObject('),join.index('t.thread.join()'))
 
 if __name__=='__main__':unittest.main()

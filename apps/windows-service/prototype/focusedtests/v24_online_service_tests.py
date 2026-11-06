@@ -10,8 +10,10 @@ class V24Online(unittest.TestCase):
     def test_auth_wfp_and_root_only_secret_order(self):
         body = SOURCE.split('void WINAPI main_service', 1)[1]
         markers = ['network.installOffline(runtime.exe.wstring())', 'control.start()',
-                   'control.wait_channel(200)', 'root.create(runtime,session)',
-                   'package_network.installOffline(root.package)', 'network.switchToProxyOnly(channel->port)',
+                   'control.wait_channel(200)', 'root.prepare_identity(runtime,session,channel->binding.sandbox)',
+                   'package_network.installOffline(root.package)', 'root.launch_suspended(runtime,session)',
+                   'control.publish_root(*channel', 'need(control.desktop_configured()&&!control.closing()',
+                   'network.switchToProxyOnly(channel->port)',
                    'package_network.switchToProxyOnly(channel->port)', 'exemption.appendAfterVerifiedWfp()',
                    'auto baseline=native_mechanism_validated', 'ResumeThread(root.thread.get())']
         for marker in markers:
@@ -29,10 +31,11 @@ class V24Online(unittest.TestCase):
     def test_actual_job_member_verifier(self):
         self.assertIn('void verify_job_members(', SOURCE)
         start = SOURCE.index('void verify_job_members(')
-        end = SOURCE.index('\np::Reply native_mechanism_validated', start)
+        end = SOURCE.index('\nstruct AdmissionWorker', start)
         implementation = SOURCE[start:end]
         harness = r'''
 #include <vector>
+#include <algorithm>
 #include <cstdint>
 #include <cassert>
 #include <stdexcept>
@@ -44,25 +47,39 @@ struct Handle {HANDLE h;Handle(HANDLE v=0):h(v){}HANDLE get(){return h;}explicit
 struct Peer {int sid=1,session=2,logon=3;};
 struct Session {Peer peer;int id=2;};
 bool wrong=false,exited=false,unknown=false,missing=false,overflow=false,recycled=false;
+bool retire_on_refresh=false,replace_on_refresh=false,lose_root_on_refresh=false;
+unsigned queries=0;
 bool wrong_session=false,wrong_logon=false,bad_image=false,bad_package=false,exit_during_query=false;unsigned checked=0;
 void need(bool x){if(!x)throw std::runtime_error("denied");}
 DWORD WaitForSingleObject(HANDLE h,int){return unknown?999:((exited&&h==20)?WAIT_OBJECT_0:WAIT_TIMEOUT);}
-BOOL QueryInformationJobObject(HANDLE,int,void*p,DWORD,void*){auto*x=(JOBOBJECT_BASIC_PROCESS_ID_LIST*)p;x->NumberOfAssignedProcesses=overflow?3:2;x->NumberOfProcessIdsInList=2;x->ProcessIdList[0]=10;x->ProcessIdList[1]=20;return 1;}
+BOOL QueryInformationJobObject(HANDLE,int,void*p,DWORD,void*){
+ auto*x=(JOBOBJECT_BASIC_PROCESS_ID_LIST*)p;
+ const bool refreshed=++queries>1;
+ x->NumberOfProcessIdsInList=refreshed&&retire_on_refresh&&!replace_on_refresh?1:2;
+ x->NumberOfAssignedProcesses=overflow?3:x->NumberOfProcessIdsInList;
+ x->ProcessIdList[0]=refreshed&&lose_root_on_refresh?30:10;
+ x->ProcessIdList[1]=refreshed&&replace_on_refresh?30:20;
+ return 1;
+}
 HANDLE OpenProcess(DWORD,BOOL,DWORD pid){return missing&&pid==20?0:pid;}
 constexpr BOOL FALSE=0;
 DWORD GetProcessId(HANDLE h){return recycled&&h==20?21:DWORD(h);}
 std::uint64_t birth(HANDLE h){return h+100;}
 BOOL OpenProcessToken(HANDLE h,DWORD,HANDLE*out){*out=h;return 1;}
 Peer token_peer(HANDLE h){Peer p;if(wrong&&h==20)p.sid=9;if(wrong_session&&h==20)p.session=9;if(wrong_logon&&h==20)p.logon=9;if(exit_during_query&&h==20){exited=true;throw std::runtime_error("exited");}return p;}
-struct Runtime {bool image(HANDLE h){return !(bad_image&&h==20);}};
+struct Runtime {bool image(HANDLE h){return h!=30&&!(bad_image&&h==20);}};
 struct Root {Handle job{1},process{10};DWORD pid=10;std::uint64_t created_at=110;bool contained(HANDLE h){++checked;return !(bad_package&&h==20);}};
 '''
         cases = r'''
 int main(){Runtime r;Session s;Root root;
-auto accepts=[&]{try{verify_job_members(r,s,root);return true;}catch(...){return false;}};
+auto accepts=[&]{queries=0;try{verify_job_members(r,s,root);return true;}catch(...){return false;}};
 assert(accepts()&&checked==2);wrong=true;assert(!accepts());wrong=false;
 exited=true;wrong=true;assert(accepts());wrong=false;exited=false;
 unknown=true;assert(!accepts());unknown=false;missing=true;assert(!accepts());missing=false;
+missing=true;retire_on_refresh=true;assert(accepts()&&queries==2);
+replace_on_refresh=true;assert(!accepts()&&queries==2);replace_on_refresh=false;
+lose_root_on_refresh=true;assert(!accepts()&&queries==2);lose_root_on_refresh=false;
+retire_on_refresh=false;missing=false;
 overflow=true;assert(!accepts());overflow=false;recycled=true;assert(!accepts());recycled=false;
 wrong_session=true;assert(!accepts());wrong_session=false;wrong_logon=true;assert(!accepts());wrong_logon=false;
 bad_image=true;assert(!accepts());bad_image=false;bad_package=true;assert(!accepts());bad_package=false;
@@ -76,6 +93,37 @@ exit_during_query=true;assert(accepts());
             subprocess.run([str(root/'test')],check=True)
         proof = SOURCE.split('p::Reply native_mechanism_validated',1)[1]
         self.assertIn('verify_job_members(r,s,root)',proof)
+
+    def test_completed_workers_release_capacity(self):
+        start = SOURCE.index('struct AdmissionWorker')
+        end = SOURCE.index('\np::Reply native_mechanism_validated', start)
+        harness = r'''
+#include <cassert>
+#include <future>
+#include <thread>
+#include <vector>
+''' + SOURCE[start:end] + r'''
+int main(){
+ std::promise<void> release;
+ auto active=release.get_future();
+ std::vector<AdmissionWorker> workers;
+ workers.reserve(65);
+ workers.emplace_back([&]{active.wait();});
+ for(int i=0;i<100;++i){
+  workers.emplace_back([]{});
+  workers.back().done.wait();
+  reap_admission_workers(workers);
+  assert(workers.size()==1);
+ }
+ release.set_value();workers.front().done.wait();
+ reap_admission_workers(workers);assert(workers.empty());
+}
+'''
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root/'test.cpp').write_text(harness)
+            subprocess.run(['g++','-std=c++20','-Wall','-Wextra','-Werror','-pthread',str(root/'test.cpp'),'-o',str(root/'test')],check=True)
+            subprocess.run([str(root/'test')],check=True,timeout=10)
 
 if __name__ == '__main__':
     unittest.main()

@@ -26,6 +26,9 @@ enum class AdmissionStage {
   committed_validation,
   postcommit_live_checks,
   monitor_release,
+  private_offer_read,
+  private_offer_validate,
+  private_commit,
 };
 constexpr int AdmissionFailureExitCode(AdmissionStage stage) noexcept {
   switch (stage) {
@@ -50,6 +53,9 @@ constexpr int AdmissionFailureExitCode(AdmissionStage stage) noexcept {
     case AdmissionStage::committed_validation: return 98;
     case AdmissionStage::postcommit_live_checks: return 99;
     case AdmissionStage::monitor_release: return 100;
+    case AdmissionStage::private_offer_read: return 101;
+    case AdmissionStage::private_offer_validate: return 102;
+    case AdmissionStage::private_commit: return 103;
     default: return 23;
   }
 }

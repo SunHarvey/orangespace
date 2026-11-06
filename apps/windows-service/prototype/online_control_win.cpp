@@ -91,6 +91,9 @@ struct PrototypeControl::Impl {
     if(closed_status_snapshot)nd::require(!p&&!published&&last.get()==owner.get()&&
         owner->auth==auth&&owner->channel->binding==binding&&
         browser.phase==0&&process_id==0&&command==0);
+    // The initial zeroed frame of a published launch is not a closed receipt.
+    // Only finish_run can confirm an exact binding has no remaining browser.
+    if(command==0 && p)nd::require(process_id!=0);
     if(command==6){nd::require(p&&browser.phase==1);desktop=true;browser.phase=2;}
     else if(command){
       nd::require(p&&pending_command.command==0);
@@ -196,7 +199,13 @@ struct PrototypeControl::Impl {
         HANDLE waits[]{stop.get(),ready.get()};
         if(WaitForMultipleObjects(2,waits,FALSE,INFINITE)!=WAIT_OBJECT_0+1)return;
         while(WaitForSingleObject(stop.get(),3000)==WAIT_TIMEOUT) {
-          try{std::lock_guard serial(lifecycle);engine.tick();if(auto p=snapshot())check(*p);}catch(...){revoke();break;}
+          try{
+            // Engine fences slow renewal against the exact authority and runtime
+            // owner. Keep HTTPS out of the lock needed by desktop ACK/status.
+            engine.tick();
+            std::lock_guard serial(lifecycle);
+            if(auto p=snapshot())check(*p);
+          }catch(...){revoke();break;}
         }
       });
       listener=std::jthread([this]{accept();});

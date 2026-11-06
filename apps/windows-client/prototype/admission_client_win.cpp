@@ -36,14 +36,14 @@ bool SystemToken(HANDLE process) {
  return CreateWellKnownSid(WinLocalSystemSid,nullptr,sid,&size) &&
  EqualSid(reinterpret_cast<TOKEN_USER*>(data)->User.Sid,sid);
 }
-bool Transfer(HANDLE pipe,HANDLE process,void* data,DWORD size,bool write,HANDLE event) {
+bool Transfer(HANDLE pipe,HANDLE process,void* data,DWORD size,bool write,HANDLE event,DWORD timeout=1500) {
  if(!ResetEvent(event)) return false;
  OVERLAPPED ov{}; ov.hEvent=event; DWORD n=0;
  BOOL ok=write?WriteFile(pipe,data,size,&n,&ov):ReadFile(pipe,data,size,&n,&ov);
  if(!ok) {
   if(GetLastError()!=ERROR_IO_PENDING) return false;
   HANDLE waits[]{process,event};
-  if(WaitForMultipleObjects(2,waits,FALSE,1500)!=WAIT_OBJECT_0+1) {
+  if(WaitForMultipleObjects(2,waits,FALSE,timeout)!=WAIT_OBJECT_0+1) {
    CancelIoEx(pipe,&ov); GetOverlappedResult(pipe,&ov,&n,TRUE); return false;
   }
   ok=GetOverlappedResult(pipe,&ov,&n,FALSE);
@@ -199,14 +199,19 @@ std::unique_ptr<Admission> Admission::Acquire() noexcept {
   if(committed.pid==committed.root_pid && committed.created==committed.root_created) {
    st.private_owner=std::make_unique<PrivateOwner>(); // final owner BEFORE private ACK
    auto& offer=st.private_owner->offer;
-   if(!Transfer(st.pipe.h,st.process.h,&offer,sizeof(offer),false,st.transfer_event.h) ||
-      !ValidPrivateOffer(offer,committed,static_cast<std::int64_t>(GetTickCount64())))return {};
+   // The Service performs a fresh forwarding probe before offering credentials.
+   // The wait is bounded independently of the unmodified lease and proof checks.
+   stage=AdmissionStage::private_offer_read;
+   if(!Transfer(st.pipe.h,st.process.h,&offer,sizeof(offer),false,st.transfer_event.h,5000))return {};
+   stage=AdmissionStage::private_offer_validate;
+   if(!ValidPrivateOffer(offer,committed,static_cast<std::int64_t>(GetTickCount64())))return {};
    PrivateReceipt expected{};expected.base=committed;expected.nonce=offer.nonce;
    BCRYPT_ALG_HANDLE algorithm{};
    if(BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)!=0)return {};
    const auto hashed=BCryptHash(algorithm,nullptr,0,reinterpret_cast<PUCHAR>(&offer),sizeof(offer),expected.digest.data(),32);
    BCryptCloseAlgorithmProvider(algorithm,0);if(hashed!=0)return {};
    auto private_ack=expected;private_ack.phase=6;PrivateReceipt private_committed{};
+   stage=AdmissionStage::private_commit;
    if(!Transfer(st.pipe.h,st.process.h,&private_ack,sizeof(private_ack),true,st.transfer_event.h)||
       !Transfer(st.pipe.h,st.process.h,&private_committed,sizeof(private_committed),false,st.transfer_event.h)||
       !ValidPrivateReceipt(expected,private_committed,2)||

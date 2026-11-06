@@ -31,9 +31,10 @@ No proxy/Node grant, remote action, SCM install or privileged filter execution.
 * Live proof and listener precede SERVICE_RUNNING, which precedes ResumeThread.
   Provisional -> ACK -> exact peer/process and same snapshot revalidation -> complete
   status-2 frame. Replay registration/ownership prepared before provisional grant.
-* At most 64 retained concurrent worker connections (lifetime bound, no recycling).
-  Each retains exact process and pipe; disconnect, unexpected bytes, process exit,
-  root/session/stop or proof drift revokes the owned Job, retaining persistent deny.
+* At most 64 concurrent admission workers. The listener joins completed workers
+  before admitting more. A child whose retained process handle signals has retired;
+  an unverifiable live process, live disconnect, unexpected bytes, root/session
+  loss, stop or proof drift revokes the owned Job, retaining persistent deny.
   No process-name killing or PID lookup cleanup. Exact root TerminateProcess and
   bounded wait also cover failures before Job assignment.
 

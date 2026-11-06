@@ -21,6 +21,7 @@
 #include <shlobj.h>
 #include <thread>
 #include <mutex>
+#include <future>
 #include "orangespace/process_observation_acl.hpp"
 #include <filesystem>
 #include <fstream>
@@ -128,7 +129,7 @@ struct Root {
  ~Root(){if(process){DWORD code=STILL_ACTIVE;if(GetExitCodeProcess(process.get(),&code)&&code!=STILL_ACTIVE)report_fixed("root-exit-before-cleanup",code);}if(job)TerminateJobObject(job.get(),71);if(process&&live(process.get())){TerminateProcess(process.get(),71);WaitForSingleObject(process.get(),5000);}if(process&&WaitForSingleObject(process.get(),5000)==WAIT_OBJECT_0){JOBOBJECT_BASIC_ACCOUNTING_INFORMATION a{};exited=QueryInformationJobObject(job.get(),JobObjectBasicAccountingInformation,&a,sizeof(a),nullptr)&&a.ActiveProcesses==0;}if(created&&(!process||exited)){// Only a new known profile, under its original user's token context (caller owns context).
    // Cleanup context is deliberately not guessed here; retain profile for operator recovery.
   }if(package)FreeSid(package);}
- void create(Runtime&r,Session&s,std::string_view sandbox){stage="appcontainer-create";
+ void prepare_identity(Runtime&r,Session&s,std::string_view sandbox){stage="appcontainer-create";
   // Engine.start already validated the protected namespace's OS SID + central
   // owner of this UUID. No caller-supplied profile/path is accepted here.
   need(orangespace::service::chain::nd::uuid(sandbox));
@@ -149,6 +150,9 @@ struct Root {
   if(reuse){need(hr==HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS));need(DeriveAppContainerSidFromAppContainerName(profile.c_str(),&package)==S_OK);}
   else {need(hr==S_OK);PSECURITY_DESCRIPTOR sd{};need(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)",SDDL_REVISION_1,&sd,nullptr));SECURITY_ATTRIBUTES sa{sizeof(sa),sd,FALSE};Handle leaf(CreateFileW(marker.c_str(),GENERIC_WRITE,0,&sa,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr));LocalFree(sd);need(bool(leaf));DWORD n{};need(WriteFile(leaf.get(),expected.data(),DWORD(expected.size()),&n,nullptr)&&n==expected.size()&&FlushFileBuffers(leaf.get()));}
   created=true;
+ }
+ void launch_suspended(Runtime&r,Session&s) {
+  need(created&&package&&!job&&!process&&!thread);
   need(BCryptGenRandom(nullptr,cookie.data(),DWORD(cookie.size()),BCRYPT_USE_SYSTEM_PREFERRED_RNG)==0&&p::Nonzero(cookie));need(BCryptGenRandom(nullptr,(PUCHAR)&generation,sizeof(generation),BCRYPT_USE_SYSTEM_PREFERRED_RNG)==0&&generation);need(BCryptGenRandom(nullptr,(PUCHAR)&epoch,sizeof(epoch),BCRYPT_USE_SYSTEM_PREFERRED_RNG)==0&&epoch);stage="root-private-job";job=Handle(CreateJobObjectW(nullptr,nullptr));need(bool(job));JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;need(SetInformationJobObject(job.get(),JobObjectExtendedLimitInformation,&limits,sizeof(limits))!=0);
   SECURITY_CAPABILITIES caps{};caps.AppContainerSid=package;caps.Capabilities=nullptr;caps.CapabilityCount=0;
   SIZE_T size=0;InitializeProcThreadAttributeList(nullptr,1,0,&size);std::vector<BYTE> storage(size);auto attrs=(PPROC_THREAD_ATTRIBUTE_LIST)storage.data();need(InitializeProcThreadAttributeList(attrs,1,0,&size)!=0);struct Attributes{PPROC_THREAD_ATTRIBUTE_LIST p;~Attributes(){DeleteProcThreadAttributeList(p);}}owned{attrs};need(UpdateProcThreadAttribute(attrs,0,PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,&caps,sizeof(caps),nullptr,nullptr)!=0);
@@ -395,31 +399,60 @@ std::array<BYTE,32> rules_snapshot(Runtime&r,orangespace::wfp_prototype::Network
 }
 bool scm_self(){SC_HANDLE manager=OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT);if(!manager)return false;SC_HANDLE svc=OpenServiceW(manager,p::kService,SERVICE_QUERY_STATUS);SERVICE_STATUS_PROCESS state{};DWORD n{};bool ok=svc&&QueryServiceStatusEx(svc,SC_STATUS_PROCESS_INFO,(LPBYTE)&state,sizeof(state),&n)&&state.dwProcessId==GetCurrentProcessId()&&state.dwCurrentState==SERVICE_RUNNING;if(svc)CloseServiceHandle(svc);CloseServiceHandle(manager);return ok;}
 void verify_job_members(Runtime&r,Session&s,Root&root){
- // Retain each OS-observed member before examining identity. A signalled child
- // is retired work; unknown/open failures never establish safe retirement.
  constexpr DWORD capacity=4096;
+ constexpr unsigned max_retirement_retries=3;
  std::vector<ULONG_PTR> storage((sizeof(JOBOBJECT_BASIC_PROCESS_ID_LIST)+capacity*sizeof(ULONG_PTR)+sizeof(ULONG_PTR)-1)/sizeof(ULONG_PTR));
  auto*list=reinterpret_cast<JOBOBJECT_BASIC_PROCESS_ID_LIST*>(storage.data());
- need(QueryInformationJobObject(root.job.get(),JobObjectBasicProcessIdList,list,DWORD(storage.size()*sizeof(ULONG_PTR)),nullptr)!=0);
- need(list->NumberOfAssignedProcesses==list->NumberOfProcessIdsInList&&list->NumberOfProcessIdsInList<=capacity);
- bool saw_root=false;
- for(DWORD i=0;i<list->NumberOfProcessIdsInList;i++){
-  const auto raw_pid=list->ProcessIdList[i];need(raw_pid&&raw_pid<=0xffffffffu);const DWORD pid=DWORD(raw_pid);
-  Handle retained(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,pid));need(bool(retained));
-  const DWORD observed=WaitForSingleObject(retained.get(),0);
-  if(observed==WAIT_OBJECT_0&&pid!=root.pid)continue;
-  need(observed==WAIT_TIMEOUT);
-  try {
-   const auto created=birth(retained.get());need(GetProcessId(retained.get())==pid);
-   if(pid==root.pid){need(created==root.created_at);saw_root=true;}
-   need(root.contained(retained.get())&&r.image(retained.get()));
-   HANDLE raw{};need(OpenProcessToken(retained.get(),TOKEN_QUERY,&raw)!=0);Handle token(raw);auto actual=token_peer(raw);
-   need(actual.sid==s.peer.sid&&actual.session==s.id&&actual.logon==s.peer.logon);
-   const DWORD final_wait=WaitForSingleObject(retained.get(),0);
-   need(final_wait==WAIT_OBJECT_0||(final_wait==WAIT_TIMEOUT&&birth(retained.get())==created&&GetProcessId(retained.get())==pid));
-  }catch(...){if(pid!=root.pid&&WaitForSingleObject(retained.get(),0)==WAIT_OBJECT_0)continue;throw;}
+ const auto read_members=[&]{
+  need(QueryInformationJobObject(root.job.get(),JobObjectBasicProcessIdList,list,DWORD(storage.size()*sizeof(ULONG_PTR)),nullptr)!=0);
+  need(list->NumberOfAssignedProcesses==list->NumberOfProcessIdsInList&&list->NumberOfProcessIdsInList<=capacity);
+ };
+ read_members();
+ for(unsigned retries=0;;){
+  bool saw_root=false,restart=false;
+  for(DWORD i=0;i<list->NumberOfProcessIdsInList;i++){
+   const auto raw_pid=list->ProcessIdList[i];need(raw_pid&&raw_pid<=0xffffffffu);const DWORD pid=DWORD(raw_pid);
+   Handle retained(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,pid));
+   if(!retained){
+    // A child can finish between the Job query and OpenProcess. Require a
+    // fresh kernel snapshot without that PID, then verify every member again.
+    need(pid!=root.pid&&retries<max_retirement_retries);
+    read_members();
+    const auto end=list->ProcessIdList+list->NumberOfProcessIdsInList;
+    need(std::find(list->ProcessIdList,end,raw_pid)==end);
+    ++retries;restart=true;break;
+   }
+   const DWORD observed=WaitForSingleObject(retained.get(),0);
+   if(observed==WAIT_OBJECT_0&&pid!=root.pid)continue;
+   need(observed==WAIT_TIMEOUT);
+   try {
+    const auto created=birth(retained.get());need(GetProcessId(retained.get())==pid);
+    if(pid==root.pid){need(created==root.created_at);saw_root=true;}
+    need(root.contained(retained.get())&&r.image(retained.get()));
+    HANDLE raw{};need(OpenProcessToken(retained.get(),TOKEN_QUERY,&raw)!=0);Handle token(raw);auto actual=token_peer(raw);
+    need(actual.sid==s.peer.sid&&actual.session==s.id&&actual.logon==s.peer.logon);
+    const DWORD final_wait=WaitForSingleObject(retained.get(),0);
+    need((pid!=root.pid&&final_wait==WAIT_OBJECT_0)||(final_wait==WAIT_TIMEOUT&&birth(retained.get())==created&&GetProcessId(retained.get())==pid));
+   }catch(...){if(pid!=root.pid&&WaitForSingleObject(retained.get(),0)==WAIT_OBJECT_0)continue;throw;}
+  }
+  if(!restart){need(saw_root);return;}
  }
- need(saw_root);
+}
+struct AdmissionWorker {
+ std::future<void> done;
+ std::thread thread;
+ template<class F> explicit AdmissionWorker(F&& work){
+  std::packaged_task<void()> task(std::forward<F>(work));
+  done=task.get_future();
+  thread=std::thread(std::move(task));
+ }
+};
+void reap_admission_workers(std::vector<AdmissionWorker>& workers){
+ for(auto it=workers.begin();it!=workers.end();){
+  if(it->done.wait_for(std::chrono::seconds(0))==std::future_status::ready){
+   it->thread.join();it=workers.erase(it);
+  }else ++it;
+ }
 }
 p::Reply native_mechanism_validated(Runtime&r,Session&s,Root&root,p::FreshRuleInspection&inspections){
  const ULONGLONG proof_started=GetTickCount64();
@@ -472,25 +505,44 @@ void WINAPI main_service(DWORD,LPWSTR*){scm_handle=RegisterServiceCtrlHandlerW(p
   if(!channel)break;channel->budget.validate(orangespace::service::chain::nd::monotonic_ms());control.verify_live(*channel);need(session.same());
   try {
   need(ResetEvent(run_stop.get())!=0&&WaitForSingleObject(service_stop_event,0)==WAIT_TIMEOUT);
-  Root root;root.create(runtime,session,channel->binding.sandbox);TokenObservation token_observation(session,root.package);auto listener=pipe_for(session,root,true);
-  auto ws=sidtext(root.package);pkgpeer.sid=std::string(ws.begin(),ws.end());observation.publish({{session.id,session.peer},{0,pkgpeer}});
-  // RUNNING reports initialized kernel objects, not admission; full proof gates resume.
-  status(SERVICE_RUNNING);
+  Root root;
+  root.prepare_identity(runtime,session,channel->binding.sandbox);
   orangespace::wfp_prototype::PackageNetworkPolicy package_network;
-  package_network.installOffline(root.package);
   orangespace::wfp_prototype::OwnedLoopbackExemption exemption(root.package);
+  stage="root-offline-policy";
+  (void)network.verifyExactPolicy(orangespace::wfp_prototype::Mode::Offline);
+  package_network.installOffline(root.package);
   struct Cleanup {
    Root&r;orangespace::wfp_prototype::NetworkPolicy&n;orangespace::wfp_prototype::PackageNetworkPolicy&p;orangespace::wfp_prototype::OwnedLoopbackExemption&e;
    ~Cleanup(){
-    SetEvent(stop_event);TerminateJobObject(r.job.get(),71);bool denied=true,removed=false;
+    SetEvent(stop_event);if(r.job)TerminateJobObject(r.job.get(),71);bool denied=true,removed=false;
     try{n.restoreOffline();(void)n.verifyExactPolicy(orangespace::wfp_prototype::Mode::Offline);}catch(...){denied=false;}
     try{p.restoreOffline();(void)p.verifyExactPolicy(orangespace::wfp_prototype::Mode::Offline);}catch(...){denied=false;}
     // Removal is attempted even if either restore/readback failed.
     try{removed=e.removeOnlyOwned().exact;}catch(...){}
     if(!denied||!removed){report_fixed("online-cleanup-retained-deny",ERROR_INVALID_DATA);return;}
-    try{JOBOBJECT_BASIC_ACCOUNTING_INFORMATION a{};if(WaitForSingleObject(r.process.get(),5000)==WAIT_OBJECT_0&&QueryInformationJobObject(r.job.get(),JobObjectBasicAccountingInformation,&a,sizeof(a),nullptr)&&a.ActiveProcesses==0){p.cleanupAfterExactTreeExit();}}catch(...){report_fixed("online-cleanup-retained-deny",ERROR_INVALID_DATA);}
+    try{
+     // A failed creation can leave an installed policy without a process.
+     JOBOBJECT_BASIC_ACCOUNTING_INFORMATION a{};
+     if(!r.process||(r.job&&WaitForSingleObject(r.process.get(),5000)==WAIT_OBJECT_0&&QueryInformationJobObject(r.job.get(),JobObjectBasicAccountingInformation,&a,sizeof(a),nullptr)&&a.ActiveProcesses==0))
+      p.cleanupAfterExactTreeExit();
+    }catch(...){report_fixed("online-cleanup-retained-deny",ERROR_INVALID_DATA);}
    }
   }cleanup{root,network,package_network,exemption};
+  channel->budget.validate(orangespace::service::chain::nd::monotonic_ms());control.verify_live(*channel);
+  need(session.same()&&WaitForSingleObject(service_stop_event,0)==WAIT_TIMEOUT);
+  root.launch_suspended(runtime,session);
+  TokenObservation token_observation(session,root.package);auto listener=pipe_for(session,root,true);
+  auto ws=sidtext(root.package);pkgpeer.sid=std::string(ws.begin(),ws.end());observation.publish({{session.id,session.peer},{0,pkgpeer}});
+  // Desktop setup has no network authority. Keep both policies offline while
+  // the root is suspended and the interactive owner acknowledges its desktop.
+  stage="desktop-root-publication";
+  control.verify_live(*channel);channel->budget.validate(orangespace::service::chain::nd::monotonic_ms());
+  {auto sid=sidtext(root.package);control.publish_root(*channel,std::string(sid.begin(),sid.end()),std::string(root.profile.begin(),root.profile.end()),root.pid,root.created_at);}
+  stage="desktop-ack-wait";
+  while(!control.desktop_configured()&&!control.closing()&&WaitForSingleObject(service_stop_event,100)==WAIT_TIMEOUT){control.verify_live(*channel);channel->budget.validate(orangespace::service::chain::nd::monotonic_ms());}
+  need(control.desktop_configured()&&!control.closing()&&WaitForSingleObject(service_stop_event,0)==WAIT_TIMEOUT);
+  stage="root-proxy-policy";
   channel->budget.validate(orangespace::service::chain::nd::monotonic_ms());control.verify_live(*channel);
   network.switchToProxyOnly(channel->port);package_network.switchToProxyOnly(channel->port);
   need(network.verifyExactPolicy(orangespace::wfp_prototype::Mode::ProxyOnly,channel->port).size()==6&&package_network.verifyExactPolicy(orangespace::wfp_prototype::Mode::ProxyOnly,channel->port).size()==6);
@@ -503,12 +555,11 @@ void WINAPI main_service(DWORD,LPWSTR*){scm_handle=RegisterServiceCtrlHandlerW(p
    return rules_snapshot(runtime,network,package_network,channel->port);
   });
   auto baseline=native_mechanism_validated(runtime,session,root,inspections);
-  std::mutex gate;bool root_committed=false;std::set<std::pair<DWORD,std::uint64_t>> admitted;std::vector<std::thread> workers;workers.reserve(65);
-  struct Join {std::vector<std::thread>&w;Root&r;p::FreshRuleInspection&inspections;~Join(){SetEvent(stop_event);TerminateJobObject(r.job.get(),71);for(auto&t:w)if(t.joinable())t.join();inspections.stop();}}join{workers,root,inspections};
-  control.verify_live(*channel);channel->budget.validate(orangespace::service::chain::nd::monotonic_ms());
-  {auto sid=sidtext(root.package);control.publish_root(*channel,std::string(sid.begin(),sid.end()),std::string(root.profile.begin(),root.profile.end()),root.pid,root.created_at);}
-  while(!control.desktop_configured()&&!control.closing()&&WaitForSingleObject(service_stop_event,100)==WAIT_TIMEOUT){control.verify_live(*channel);channel->budget.validate(orangespace::service::chain::nd::monotonic_ms());}
+  std::mutex gate;bool root_committed=false;std::set<std::pair<DWORD,std::uint64_t>> admitted;std::vector<AdmissionWorker> workers;workers.reserve(65);
+  struct Join {std::vector<AdmissionWorker>&w;Root&r;p::FreshRuleInspection&inspections;~Join(){SetEvent(stop_event);TerminateJobObject(r.job.get(),71);for(auto&t:w)if(t.thread.joinable())t.thread.join();inspections.stop();}}join{workers,root,inspections};
+  stage="desktop-resume";
   need(!control.closing()&&WaitForSingleObject(service_stop_event,0)==WAIT_TIMEOUT);
+  channel->budget.validate(orangespace::service::chain::nd::monotonic_ms());
   control.verify_live(*channel);
   need(ResumeThread(root.thread.get())!=DWORD(-1));
   // Independent continuous full-proof watchdog: accept never queues behind it.
@@ -522,6 +573,7 @@ void WINAPI main_service(DWORD,LPWSTR*){scm_handle=RegisterServiceCtrlHandlerW(p
   while(live(root.process.get())&&WaitForSingleObject(stop_event,0)==WAIT_TIMEOUT){
    Handle ev(CreateEventW(nullptr,TRUE,FALSE,nullptr));need(bool(ev));OVERLAPPED ov{};ov.hEvent=ev.get();BOOL connected=ConnectNamedPipe(listener.get(),&ov);
    if(!connected&&GetLastError()==ERROR_IO_PENDING){HANDLE waits[]{stop_event,ev.get()};DWORD w=WaitForMultipleObjects(2,waits,FALSE,200);if(w!=WAIT_OBJECT_0+1){CancelIoEx(listener.get(),&ov);DWORD n{};GetOverlappedResult(listener.get(),&ov,&n,TRUE);if(w==WAIT_TIMEOUT)continue;break;}DWORD n{};need(GetOverlappedResult(listener.get(),&ov,&n,FALSE)!=0);}else need(connected||GetLastError()==ERROR_PIPE_CONNECTED);
+   stage="admission-worker-capacity";reap_admission_workers(workers);
    need(workers.size()<65);auto next=pipe_for(session,root,false);
    workers.emplace_back([&,pipe=std::move(listener)]()mutable{
     try{
@@ -569,17 +621,23 @@ void WINAPI main_service(DWORD,LPWSTR*){scm_handle=RegisterServiceCtrlHandlerW(p
       return;
      }
      report_fixed("admission-committed",binding.pid);
+     const auto retire_child=[&]{
+      // Only a retained, signalled child reaches this point. Its PID/birth
+      // cannot pass the live-process fence again, even if the PID is reused.
+      {std::lock_guard lock(gate);admitted.erase({binding.pid,binding.created});}
+      report_fixed("admission-child-exited",binding.pid);
+     };
      while(WaitForSingleObject(stop_event,200)==WAIT_TIMEOUT){
       // A retained, kernel-signalled non-root process has no remaining work
       // to revoke. Chromium normally retires utility children during startup.
       // A live disconnect or any unknown observation still revokes the Job.
       stage="admission-monitor-process";
       const DWORD process_wait=WaitForSingleObject(retained.get(),0);
-      if(process_wait==WAIT_OBJECT_0&&binding.pid!=root.pid){report_fixed("admission-child-exited",binding.pid);break;}
+      if(process_wait==WAIT_OBJECT_0&&binding.pid!=root.pid){retire_child();break;}
       need(process_wait==WAIT_TIMEOUT&&birth(retained.get())==binding.created);
       stage="admission-monitor-pipe";
       DWORD pending{};const bool pipe_ok=PeekNamedPipe(pipe.get(),nullptr,0,nullptr,&pending,nullptr)!=0;
-      if(!pipe_ok&&binding.pid!=root.pid&&WaitForSingleObject(retained.get(),0)==WAIT_OBJECT_0){report_fixed("admission-child-exited",binding.pid);break;}
+      if(!pipe_ok&&binding.pid!=root.pid&&WaitForSingleObject(retained.get(),0)==WAIT_OBJECT_0){retire_child();break;}
       need(pipe_ok&&pending==0);
       ULONG pid{};need(GetNamedPipeClientProcessId(pipe.get(),&pid)&&pid==pipe_opener);
      }

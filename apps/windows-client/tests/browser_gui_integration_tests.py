@@ -10,16 +10,18 @@ class BrowserIntegration(unittest.TestCase):
   self.assertIn('g.protocol()==3',s)
   self.assertIn('browser_wire_birth',s)
   self.assertLess(s.index('validate_browser_reply'),s.index('std::uint8_t ack = 6'))
- def test_owner_fenced_async_browser_and_embedded_window(self):
+ def test_owner_fenced_async_browser_and_independent_window(self):
   s=(R/'src/main_win.cpp').read_text()
-  for token in ['poll_browser()', 'browser_worker_=std::thread', 'i->second==box->lease', 'SetParent(', 'GetProcessTimes(', 'QueryFullProcessImageNameW(', 'ProcessIdToSessionId(', 'GetWindowThreadProcessId(', 'SetWindowSubclass(address_', 'bs::Command::navigate', 'bs::Command::close', 'station_.grant(', 'station_.restore()']:
+  for token in ['poll_browser()', 'browser_worker_=std::thread', 'i->second==box->lease', 'GetProcessTimes(', 'QueryFullProcessImageNameW(', 'ProcessIdToSessionId(', 'bs::Command::close', 'station_.grant(', 'station_.restore()']:
    self.assertIn(token,s)
   self.assertNotIn('WM_COPYDATA',s)
+  self.assertNotIn('SetParent(',s)
+  self.assertNotIn('EnumWindows(',s)
   self.assertIn('browser_enabled(auth_.nodes()[index].node_id)',s)
   self.assertIn('browser_command_=bs::Command::close',s)
   self.assertIn('if(!tunnels_.empty())',s)
   self.assertIn('浏览暂不可用',s)
- def test_close_browser_before_helper_and_hide_file_switch(self):
+ def test_close_browser_before_helper(self):
   s=(R/'src/main_win.cpp').read_text()
   a=s.index('if(closing) {');z=s.index('out.stopped=stopping',a)
   self.assertLess(s[a:z].index('wait_browser_closed(*closing)'),s[a:z].index('sc::stop_tunnel'))
@@ -43,5 +45,4 @@ class BrowserIntegration(unittest.TestCase):
   guard='if(!closed || (browser_process_ && WaitForSingleObject(browser_process_,0)!=WAIT_OBJECT_0))return false;'
   self.assertLess(cleanup.index(guard),cleanup.index('return retirement_.run('))
   self.assertIn('[&]{sc::logout(*grant);},[&]{sc::retire(*grant);}',cleanup)
-  self.assertIn('ShowWindow(browser_hwnd_,visible?SW_SHOW:SW_HIDE)',s)
 if __name__=='__main__': unittest.main()

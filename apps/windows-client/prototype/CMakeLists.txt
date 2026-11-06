@@ -102,7 +102,7 @@ target_compile_definitions(orangespace_cef_prototype PRIVATE CEF_USE_BOOTSTRAP
 target_compile_options(orangespace_cef_prototype PRIVATE /W4 /WX /EHsc /utf-8 /wd4996)
 target_link_options(orangespace_cef_prototype PRIVATE ${CEF_DELAYLOAD_FLAGS})
 target_link_libraries(orangespace_cef_prototype PRIVATE
-  libcef_dll_wrapper orangespace_pinned_libcef ${CEF_STANDARD_LIBS} bcrypt advapi32)
+  libcef_dll_wrapper orangespace_pinned_libcef ${CEF_STANDARD_LIBS} bcrypt advapi32 comctl32)
 add_custom_command(TARGET orangespace_cef_prototype POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different
     "${CEF_ROOT}/Release/bootstrap.exe" "$<TARGET_FILE_DIR:orangespace_cef_prototype>/client.exe"

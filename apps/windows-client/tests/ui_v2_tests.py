@@ -232,7 +232,7 @@ int main(){
         structs=source[source.index('struct TunnelLease {'):source.index('struct Completion {')]
         # Browser USER/HWND code has its own Windows link/source tests. Retain
         # these exact diagnostic worker bodies and all original stale negatives.
-        methods=source[source.index('  bool status_fresh('):source.index('  static bool browser_enabled(')]+source[source.index('  void poll_status() {'):source.index('  void poll() {')]
+        methods=source[source.index('  bool status_fresh('):source.index('  static bool browser_closed(')]+source[source.index('  void poll_status() {'):source.index('  void poll() {')]
         harness=r'''
 #include "orangespace/browser_session.hpp"
 #include <cassert>

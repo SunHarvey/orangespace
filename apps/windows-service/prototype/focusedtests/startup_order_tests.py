@@ -15,23 +15,26 @@ class StartupOrder(unittest.TestCase):
         body = SOURCE.split("void WINAPI main_service", 1)[1]
         markers = ["network.installOffline(runtime.exe.wstring())",
                    "observation.publish({{session.id,session.peer}})",
-                   "PrototypeControl control(", "control.start();status(SERVICE_RUNNING)",
-                   "channel=control.wait_channel(200)", "need(bool(channel))",
+                   "PrototypeControl control(", "control.start()", "status(SERVICE_RUNNING)",
+                   "channel=control.wait_channel(200)", "if(!channel)break",
                    "control.verify_live(*channel);need(session.same())",
-                   "root.create(runtime,session)", "auto listener=pipe_for(session,root,true)",
+                   "root.prepare_identity(runtime,session,channel->binding.sandbox)",
+                   "network.verifyExactPolicy(orangespace::wfp_prototype::Mode::Offline)",
+                   "package_network.installOffline(root.package)",
+                   "root.launch_suspended(runtime,session)", "auto listener=pipe_for(session,root,true)",
                    "observation.publish({{session.id,session.peer},{0,pkgpeer}})",
-                   "status(SERVICE_RUNNING)", "package_network.installOffline(root.package)",
-                   "OwnedLoopbackExemption exemption(root.package)",
+                   "control.publish_root(*channel", 'stage="desktop-ack-wait"',
+                   "need(control.desktop_configured()&&!control.closing()",
                    "control.verify_live(*channel)", "network.switchToProxyOnly(channel->port)",
                    "package_network.switchToProxyOnly(channel->port)",
                    "need(network.verifyExactPolicy(orangespace::wfp_prototype::Mode::ProxyOnly,channel->port).size()==6&&package_network.verifyExactPolicy(orangespace::wfp_prototype::Mode::ProxyOnly,channel->port).size()==6)",
                    "need(exemption.appendAfterVerifiedWfp().exact)",
                    "p::FreshRuleInspection inspections(",
                    "auto baseline=native_mechanism_validated(runtime,session,root,inspections)",
-                   "control.verify_live(*channel);channel->budget.validate(",
+                   'stage="desktop-resume"', "channel->budget.validate(",
                    "ResumeThread(root.thread.get())", "workers.emplace_back(", "admitted.insert("]
-        # Search successive ranges, not the first occurrence of repeated RUNNING/
-        # observation/control markers: online login precedes suspended Root creation.
+        # Both deny policies must be installed before process creation. The
+        # desktop can be prepared without opening even the loopback proxy.
         end = 0
         for marker in markers:
             end = body.index(marker, end) + len(marker)

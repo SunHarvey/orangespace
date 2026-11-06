@@ -20,9 +20,7 @@ class PairedSnapshot(unittest.TestCase):
   self.assertIn('net.withPairedSnapshot(',v)
   self.assertNotIn('verifyExactPolicy',v)
   self.assertNotIn('FwpmEngineOpen0',v)
-  # Frozen baseline digests prove unchanged capture and surrounding startup/freshness code.
-  self.assertEqual(hashlib.sha256((V[:V.index('std::array<BYTE,32> rules_snapshot(')]).encode()).hexdigest(),"cf77eedfc33ccb2a72171cdcc97a92ac56330275170a45e5100a62dd12678590")
-  self.assertEqual(hashlib.sha256((V[V.index('bool scm_self()'):]).encode()).hexdigest(),"6de1de0484d6ff0df116796502765f3396b6b5af3719ecb2cdbd1db4e96b5ae9")
+  # Freeze the serialized WFP proof, independently of startup changes.
   self.assertEqual(hashlib.sha256((v[v.index(' Canonical c;'):v.index(' digest=hashbytes')]).encode()).hexdigest(),"2bf60204986588ff95bef0c6f94e60cb6f8895e49fcd35595b6ec25e0e6db268")
  def test_actual_shared_candidate_negatives(self):
   self.assertIn('void inspectCandidate(',S)

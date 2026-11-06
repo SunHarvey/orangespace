@@ -192,6 +192,9 @@ void publication_races(){
 }
 void active_gates(){
   {Control c;(void)c.request();::check(c.engine.status_calls==2,"live read retains status and actual check");}
+  {Control c;c.browser.phase=0;c.process_id=0;c.process_birth=0;
+   denied([&]{c.request();},"a published launch with no root must not report closed");
+   ::check(c.engine.status_calls==2,"startup still checks live owner");}
   for(int command=1;command<=6;++command){
     Control c;
     if(command==6)c.browser.phase=1;

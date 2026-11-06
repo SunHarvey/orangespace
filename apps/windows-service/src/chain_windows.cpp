@@ -6,6 +6,7 @@
 #include <sddl.h>
 #include <bcrypt.h>
 #include <chrono>
+#include <exception>
 #include <set>
 #ifdef ORANGESPACE_NATIVE_ACCEPTANCE_TRACE
 #include <cstdio>
@@ -18,6 +19,33 @@ namespace orangespace::service::win {
 namespace {
 namespace detail = node_session::detail;
 using namespace chain;
+#ifdef ORANGESPACE_PROTOTYPE_NODE_UUID
+thread_local const wchar_t* platform_authorization_phase{};
+class PlatformAuthorizationTrace {
+  const bool enabled_;
+  const int exceptions_{std::uncaught_exceptions()};
+  const wchar_t* previous_{platform_authorization_phase};
+public:
+  explicit PlatformAuthorizationTrace(std::span<const std::uint8_t> bytes) noexcept
+      :enabled_(bytes.size()>=5 && bytes[0]=='O' && bytes[1]=='S' && bytes[2]=='P' && bytes[3]=='3' && bytes[4]==1) {
+    if(enabled_)platform_authorization_phase=L"platform-auth-dispatch-parse";
+  }
+  ~PlatformAuthorizationTrace() noexcept {
+    if(!enabled_)return;
+    const auto phase=platform_authorization_phase;
+    platform_authorization_phase=previous_;
+    if(std::uncaught_exceptions()<=exceptions_)return;
+    const DWORD saved=GetLastError();
+    // Same Application event source as the prototype Service. Only fixed labels enter the event.
+    if(const auto log=RegisterEventSourceW(nullptr,L"OrangeSpaceSinglePrototype.SG.v25")) {
+      LPCWSTR strings[]{phase};
+      ReportEventW(log,EVENTLOG_ERROR_TYPE,0,1,nullptr,1,0,strings,nullptr);
+      DeregisterEventSource(log);
+    }
+    SetLastError(saved);
+  }
+};
+#endif
 void checked(BOOL ok, const char*) { if(!ok) throw std::runtime_error("protected runtime rejected"); }
 struct LocalClose { void operator()(void* p) const noexcept { if(p) LocalFree(p); } };
 using Local=std::unique_ptr<void,LocalClose>;
@@ -190,6 +218,10 @@ class StateStore {
 public:
   explicit StateStore(bool prototype=false):prototype_(prototype) {}
   std::vector<Persisted> load() {
+#ifdef ORANGESPACE_PROTOTYPE_NODE_UUID
+    const auto previous_phase=platform_authorization_phase;
+    if(prototype_ && previous_phase)platform_authorization_phase=L"platform-auth-namespace-state-load";
+#endif
     const auto directory=installation();
     const auto layout=prototype_ ? prototype_namespace_paths(directory) :
       PrototypeNamespacePaths{directory+L"nodes.json",directory+L"service-state.json",directory+L"service-state.next"};
@@ -197,7 +229,12 @@ public:
     // A fixed existing nodes.json anchor retains the protected installation
     // directory/ancestors against replacement for the entire store lifetime.
     directory_anchor_=std::make_unique<PinnedFile>(layout.anchor);
-    last_=read(); return parse_state(last_); // absent/corrupt is NEVER empty state
+    last_=read();
+    auto state=parse_state(last_); // absent/corrupt is NEVER empty state
+#ifdef ORANGESPACE_PROTOTYPE_NODE_UUID
+    if(prototype_)platform_authorization_phase=previous_phase;
+#endif
+    return state;
   }
   void save(const std::vector<Persisted>& state) {
     detail::require(directory_anchor_!=nullptr); directory_anchor_->verify();
@@ -317,26 +354,37 @@ public:
     if(state->runtime){os_runtime_free(state->runtime);state->runtime=nullptr;}
   }
   std::shared_ptr<Session> restore(std::string_view alias,std::string_view envelope) override {
+    const wchar_t** phase=nullptr;
+#ifdef ORANGESPACE_PROTOTYPE_NODE_UUID
+    if(prototype_mixed_ && platform_authorization_phase)phase=&platform_authorization_phase;
+#endif
     std::shared_ptr<node_session::TrustedCatalog> catalog;
     {
       std::lock_guard lock(mutex_);
+      mark_platform_authorization(phase,L"platform-auth-node-catalog");
       if(!catalog_) {
         auto dir=installation();
         catalog_pin_=std::make_unique<PinnedFile>(dir+L"nodes.json");
         catalog_=std::make_shared<node_session::TrustedCatalog>(node_session::TrustedCatalog::load(dir+L"nodes.json"));
       }
       catalog_pin_->verify(); catalog=catalog_;
+      mark_platform_authorization(phase,L"platform-auth-center-config-pin");
       if(platform_mode_)platform_pin_->verify();
     }
     if(platform_mode_) {
+      mark_platform_authorization(phase,L"platform-auth-envelope-parse");
       detail::exact_wire_integers(envelope);detail::JsonGuard request(envelope);detail::object(request.value,2);
       auto selected=platform::parse_node(detail::field(request.value,"node"));detail::require(alias==selected.node_id);
       const auto& saved=detail::text(detail::field(request.value,"envelope"));
+      mark_platform_authorization(phase,L"platform-auth-center-restore");
       auto central=platform_session::Session::restore(*platform_config_,saved);
+      mark_platform_authorization(phase,L"platform-auth-exchange-reserve");
       auto receipt=platform_receipts_.reserve(catalog,selected.node_id);
       try {
         auto session=std::make_shared<PlatformNode>(catalog,receipt,std::move(central),std::move(selected));
-        session->initialize();return session;
+        session->initialize(phase);
+        mark_platform_authorization(phase,L"platform-auth-engine-finalize");
+        return session;
       } catch(...) {receipt->abandon();throw;}
     }
     return std::make_shared<Node>(std::move(catalog),alias,envelope);
@@ -641,9 +689,15 @@ std::shared_ptr<chain::Namespace> make_prototype_chain_namespace() {
   return std::make_shared<chain::Namespace>([store]{return store->load();},[store](const auto& state){store->save(state);});
 }
 chain::Response dispatch_platform_chain(chain::Engine& engine,const Peer& peer,std::span<const std::uint8_t> bytes) {
+#ifdef ORANGESPACE_PROTOTYPE_NODE_UUID
+  PlatformAuthorizationTrace trace(bytes);
+#endif
   auto request=platform::parse_request(bytes);const auto& root=request.body.value;
   if(request.op==1) {
     const auto selected=platform::parse_node(detail::field(root,"node"));
+#ifdef ORANGESPACE_PROTOTYPE_NODE_UUID
+    platform_authorization_phase=L"platform-auth-namespace-or-admission";
+#endif
     return engine.authorize_response(peer,selected.node_id,std::string_view(reinterpret_cast<const char*>(bytes.data()+12),bytes.size()-12));
   }
   if(request.op==7) {

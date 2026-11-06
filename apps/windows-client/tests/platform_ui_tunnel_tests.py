@@ -29,21 +29,28 @@ struct Grant {
  Grant(Grant&&)noexcept=default;
 };
 static int authorizations=0,registrations=0,starts=0;
-static bool fail_start=false;
+static bool fail_authorize=false,fail_register=false,fail_start=false;
 Grant authorize_platform(const ps::Session& s,const ps::NodeRef& n) {
- ++authorizations;return Grant{s.central,n.remote_legacy_user_id,n.node_id};
+ ++authorizations;if(fail_authorize)throw 1;return Grant{s.central,n.remote_legacy_user_id,n.node_id};
 }
 orangespace::service::chain::Cursor register_sandbox(const Grant& g,std::string_view local) {
- ++registrations;assert(g.central=="central");return {"service-"+std::string(local),99};
+ ++registrations;if(fail_register)throw 1;assert(g.central=="central");return {"service-"+std::string(local),99};
 }
 orangespace::service::chain::Binding start_registered_tunnel(const Grant& g,std::string_view local) {
  ++starts;if(fail_start)throw 1;
  return {g.legacy,"service-"+std::string(local),g.node,"exact-helper",100};
 }
 }
+namespace bs {
+enum class Command {status};
+struct State {};
+State exchange(const sc::Grant&,const orangespace::service::chain::Binding&,Command){return {};}
+}
+bool browser_closed(const bs::State&){return true;}
 namespace Auth {struct Operation {std::int64_t expiry{1000};};}
 std::int64_t now(){return 10;}
 enum class Job {tunnel};
+/*STAGES*/
 struct TunnelLease {
  std::shared_ptr<sc::Grant> grant;
  orangespace::service::chain::Binding binding;
@@ -52,7 +59,7 @@ struct TunnelLease {
 struct Completion {
  std::shared_ptr<TunnelLease> tunnel;
  std::shared_ptr<sc::Grant> grant;
- Job job{};Auth::Operation operation;
+ Job job{};TunnelStartStage tunnel_start_stage{};Auth::Operation operation;
  std::string local_sandbox;
  orangespace::PlatformRows::Ticket row_ticket;
  std::optional<orangespace::service::chain::Cursor> cursor;
@@ -72,6 +79,7 @@ Completion run(std::shared_ptr<sc::Grant> grant,std::string local,ps::NodeRef no
 int main(){
  auto a=run({},"A",{"node-A","legacy-A"});
  assert(!a.failed && a.grant && a.tunnel && a.tunnel->local=="A");
+ assert(a.tunnel_start_stage==TunnelStartStage::none);
  assert(a.grant->central=="central" && a.tunnel->binding.user=="legacy-A");
  auto b=run({},"B",{"node-B","legacy-B"});
  assert(!b.failed && b.grant->central==a.grant->central);
@@ -80,14 +88,27 @@ int main(){
  assert(a.cursor->generation==100); // Service result, never UI generation.
  auto sibling=run(a.grant,"A2",{"node-A","legacy-A"});
  assert(!sibling.failed && !sibling.grant && sc::authorizations==2);
+ sc::fail_authorize=true;
+ auto denied=run({},"C",{"node-A","legacy-A"});
+ assert(denied.failed && !denied.grant && denied.tunnel_start_stage==TunnelStartStage::authorize);
+ sc::fail_authorize=false;
+ sc::fail_register=true;
+ auto unregistered=run({},"C",{"node-A","legacy-A"});
+ assert(unregistered.failed && unregistered.grant && unregistered.tunnel_start_stage==TunnelStartStage::register_sandbox);
+ sc::fail_register=false;
  sc::fail_start=true;
  auto failed=run(a.grant,"A",{"node-A","legacy-A"},a.tunnel);
  assert(failed.failed && failed.tunnel==a.tunnel); // exact old owner survives.
+ assert(failed.tunnel_start_stage==TunnelStartStage::start_tunnel);
  assert(b.tunnel->binding.node=="node-B" && b.tunnel->binding.generation==100);
  int before=sc::registrations;
  auto cancelled=run(a.grant,"A",{"node-A","legacy-A"},a.tunnel,true);
  assert(cancelled.failed && cancelled.tunnel==a.tunnel && sc::registrations==before);
- std::cout << "actual platform start worker: central/legacy split, node grants cached, ledger cursor, failure/cancel exact owner and sibling preservation PASS\n";
+ assert(cancelled.tunnel_start_stage==TunnelStartStage::none);
+ assert(std::wstring_view(tunnel_start_failure(denied.tunnel_start_stage)).find(L"授权")!=std::wstring_view::npos);
+ assert(std::wstring_view(tunnel_start_failure(unregistered.tunnel_start_stage)).find(L"注册")!=std::wstring_view::npos);
+ assert(std::wstring_view(tunnel_start_failure(failed.tunnel_start_stage)).find(L"隧道启动")!=std::wstring_view::npos);
+ std::cout << "actual platform start worker: authority, cursor, exact ownership and fixed failure stages PASS\n";
 }
 '''
 
@@ -98,7 +119,8 @@ def main():
     worker=text.split(marker,1)[1].split('      });',1)[0]
     # Return in the real lambda returns void. Keep it in a lambda here too.
     worker='auto work=[&]() {\n'+worker+'\n};work();'
-    src=a.output/'start_worker.cpp';src.write_text(PRELUDE.replace('/*WORKER*/',worker));exe=a.output/'start_worker'
+    stages=text[text.index('enum class TunnelStartStage '):text.index('// Grant ownership begins')]
+    src=a.output/'start_worker.cpp';src.write_text(PRELUDE.replace('/*WORKER*/',worker).replace('/*STAGES*/',stages));exe=a.output/'start_worker'
     cmd=['g++','-std=c++20','-Wall','-Wextra','-Werror','-pthread','-fno-elide-constructors','-I'+str(ROOT/'apps/windows-client/include'),str(src),'-o',str(exe)]
     build=subprocess.run(cmd,text=True,capture_output=True);(a.output/'build.log').write_text(build.stdout+build.stderr)
     if build.returncode:print(build.stderr);raise SystemExit(build.returncode)
