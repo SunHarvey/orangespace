@@ -1,5 +1,7 @@
 # 橙域 OrangeSpace
 
+此分支的开发入口是 [本地 Linux 桌面沙盒](linux-desktop/README.md)。Windows 客户端统一管理轻量 Debian 虚拟机，分别打开每个沙盒的 Chromium、文件管理器和指定节点网关。下文记录原有原生 Windows 产品线。
+
 <p align="center">
   <img src="assets/brand/orangespace-logo-approved.png" width="160" alt="橙域 OrangeSpace Logo">
 </p>

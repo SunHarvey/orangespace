@@ -1,5 +1,7 @@
 # OrangeSpace 开发约定
 
+- `linux-desktop/` 是独立的本地 Linux 后端。桌面和 Chromium 运行在用户电脑的 Debian 客体中，图形和输入只在客体与本机 Windows 窗口之间传递。此目录使用容器命名空间和专属网关强制节点路由。下面的 Windows CEF/WFP 约定继续适用于原有原生后端。
+
 - 先读 `README.md`、`docs/architecture.md`、`docs/verification.md`，区分真实已实现能力与尚未完成部分。
 - Windows 客户端用 C++20/CEF，路由核心和 broker 用 Rust，Linux 文件节点用 Python/FastAPI。不要改成远程浏览器或画面传输方案。
 - 用户/沙盒/节点/连接代次必须显式绑定；不能引入全局 current_node，或跨沙盒共用会话。

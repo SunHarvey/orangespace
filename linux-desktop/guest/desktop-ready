@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+# Validate an actual window manager across this desktop's X display.
+xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -Eq 'window id # 0x[1-9a-fA-F][[:xdigit:]]*'
+if [ "${1:-}" = "--initial" ] && [ ! -f "$XDG_RUNTIME_DIR/first-window" ]; then
+    for id in $(xprop -root _NET_CLIENT_LIST | grep -oE '0x[[:xdigit:]]+'); do
+        if xprop -id "$id" WM_CLASS 2>/dev/null | grep -iq '"chromium"'; then
+            touch "$XDG_RUNTIME_DIR/first-window"
+            exit 0
+        fi
+    done
+    exit 1
+fi

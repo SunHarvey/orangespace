@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""Root-only local desktop lifecycle. Called by the authenticated guest controller."""
+import contextlib
+import fcntl
+import json
+import os
+from pathlib import Path
+import stat
+import subprocess
+import sys
+import time
+import uuid
+
+ROOT = Path("/var/lib/orangespace/desktop")
+DISPLAY_ROOT = Path("/run/orangespace/display")
+NETWORK = Path("/opt/orangespace/network")
+GUEST = Path("/opt/orangespace/guest")
+DOCKER = ("/usr/bin/docker", "--host", "unix:///var/run/docker.sock")
+IMAGE = "orangespace/desktop:dev"
+LABEL = "io.orangespace.desktop."
+UID = 1000
+MAX_POLICY_BYTES = 32768
+
+
+class DesktopError(Exception):
+    pass
+
+
+def identifier(value):
+    if str(uuid.UUID(value)) != value:
+        raise ValueError("expected a canonical lower-case UUID")
+    return value
+
+
+def execute(*args, timeout=30):
+    try:
+        return subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise DesktopError(f"{Path(args[0]).name} timed out") from exc
+
+
+def checked(*args, timeout=30):
+    result = execute(*args, timeout=timeout)
+    if result.returncode:
+        # Report only the command and return code. Daemon stderr may contain private paths.
+        verb = args[len(DOCKER)] if args[:len(DOCKER)] == DOCKER else args[1]
+        raise DesktopError(f"{Path(args[0]).name} {verb} failed ({result.returncode})")
+    return result.stdout.strip()
+
+
+def inspect(sandbox, user):
+    name = "osdesk-" + sandbox
+    cid = checked(*DOCKER, "ps", "-aq", "--no-trunc", "--filter", f"name=^/{name}$")
+    if not cid:
+        return None
+    info, = json.loads(checked(*DOCKER, "inspect", "--type", "container", cid))
+    labels = info["Config"]["Labels"] or {}
+    if (info["Name"] != "/" + name or labels.get(LABEL + "user") != user
+            or labels.get(LABEL + "sandbox") != sandbox or not labels.get(LABEL + "node")):
+        raise DesktopError("container name belongs to another desktop")
+    return info
+
+
+def gateway(operation, sandbox, *args):
+    result = execute(str(NETWORK / operation), sandbox, *args)
+    return result.returncode == 0
+
+
+def disconnect(sandbox):
+    if not gateway("down", sandbox):
+        raise DesktopError("sandbox gateway cleanup failed")
+
+
+@contextlib.contextmanager
+def ownership(user, sandbox, claim):
+    for required in (ROOT, ROOT / "locks", ROOT / "instances"):
+        required.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (ROOT / "locks" / sandbox).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        directory = ROOT / "instances" / sandbox
+        directory.mkdir(mode=0o700, exist_ok=True)
+        owner = directory / "owner"
+        if owner.exists() and owner.read_text().strip() != user:
+            raise DesktopError("sandbox belongs to another account")
+        if claim and not owner.exists():
+            temp = directory / ".owner-new"
+            with temp.open("w") as out:
+                out.write(user + "\n")
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(temp, owner)
+            fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        yield directory
+
+
+def prepare_mounts(directory, sandbox):
+    display = DISPLAY_ROOT / sandbox
+    if (not stat.S_ISDIR(display.lstat().st_mode)
+            or not stat.S_ISSOCK((display / "X0").lstat().st_mode)
+            or not stat.S_ISREG((display / "Xauthority").lstat().st_mode)):
+        raise DesktopError("private X11 socket and authority are required")
+    home = directory / "home"
+    if not home.exists():
+        home.mkdir(mode=0o700)
+        os.chown(home, UID, UID)
+    machine_id = directory / "machine-id"
+    machine_id.write_text(uuid.UUID(sandbox).hex + "\n")
+    machine_id.chmod(0o444)
+    return home, display, machine_id
+
+
+def create(user, sandbox, node, directory):
+    home, display, machine_id = prepare_mounts(directory, sandbox)
+    flags = ["--name", "osdesk-" + sandbox, "--hostname", "osdesk-" + sandbox,
+             "--pull=never", "--network=none",
+             "--ipc=private", "--init", "--read-only", "--user", "1000:1000",
+             "--cap-drop=ALL", "--security-opt=no-new-privileges",
+             "--security-opt=apparmor=orangespace-desktop",
+             "--security-opt=seccomp=/etc/orangespace/desktop-seccomp.json",
+             "--memory=2g", "--memory-swap=2g", "--pids-limit=512", "--cpu-shares=512",
+             "--shm-size=256m", "--tmpfs", "/tmp:rw,nosuid,nodev,mode=1777,size=192m",
+             "--tmpfs", "/run/user/1000:rw,nosuid,nodev,noexec,mode=0700,uid=1000,gid=1000,size=16m",
+             "--log-driver=local", "--log-opt=max-size=5m", "--log-opt=max-file=2"]
+    for key, value in (("user", user), ("sandbox", sandbox), ("node", node)):
+        flags.extend(["--label", LABEL + key + "=" + value])
+    for source, target, writable in ((home, "/home/desktop", True),
+                                      (display, "/tmp/.X11-unix", False),
+                                      (machine_id, "/etc/machine-id", False),
+                                      (GUEST / "resolv.conf", "/etc/resolv.conf", False)):
+        mount = f"type=bind,src={source},dst={target}"
+        flags.extend(["--mount", mount if writable else mount + ",readonly"])
+    checked(*DOCKER, "create", *flags, IMAGE)
+
+
+def remove(info):
+    cid = info["Id"]
+    if info["State"]["Running"]:
+        # The browser handles SIGTERM by flushing its own profile. Wait before removing the namespace.
+        execute(*DOCKER, "exec", cid, "/bin/sh", "-c",
+                'pid=$(cat "$XDG_RUNTIME_DIR/browser.pid") || exit 0; '
+                'kill -TERM "$pid" 2>/dev/null || exit 0; '
+                'i=0; while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 30 ]; do sleep .1; i=$((i+1)); done',
+                timeout=8)
+        checked(*DOCKER, "stop", "--time=8", cid, timeout=20)
+    checked(*DOCKER, "rm", cid)
+
+
+def network_state(sandbox):
+    if not gateway("status", sandbox):
+        return "offline"
+    probe = execute(str(NETWORK / "probe"), sandbox, timeout=6)
+    if probe.returncode == 0:
+        return "online"
+    return "gateway-ready" if probe.returncode == 2 else "offline"
+
+
+def configure(sandbox, node, stream):
+    raw = stream.read(MAX_POLICY_BYTES + 1)
+    if not raw or len(raw) > MAX_POLICY_BYTES:
+        raise DesktopError("node configuration must be between 1 and 32768 bytes")
+    try:
+        result = subprocess.run([str(NETWORK / "configure"), sandbox, node], input=raw,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    except subprocess.TimeoutExpired as exc:
+        raise DesktopError("node configuration timed out") from exc
+    if result.returncode:
+        raise DesktopError("node configuration rejected")
+
+
+def stop(sandbox, info):
+    # Even on a failed gateway cleanup, tear down only this container and report the cleanup error.
+    try:
+        disconnect(sandbox)
+    finally:
+        if info:
+            remove(info)
+
+
+def open_desktop(user, sandbox, node, directory, info):
+    if not info or not info["State"]["Running"]:
+        disconnect(sandbox)
+        if info:
+            remove(info)
+        create(user, sandbox, node, directory)
+        checked(*DOCKER, "start", "osdesk-" + sandbox)
+        info = inspect(sandbox, user)
+    if not info or not info["State"]["Running"]:
+        raise DesktopError("desktop container failed to start")
+    cid = info["Id"]
+    if not gateway("status", sandbox):
+        if not gateway("up", sandbox, str(info["State"]["Pid"]), node):
+            disconnect(sandbox)
+    checked(*DOCKER, "exec", cid, "touch", "/run/user/1000/launch")
+    # First run verifies a real browser window. Reopening a desktop still works after a user closes Chromium.
+    for _ in range(32):
+        probe = execute(*DOCKER, "exec", cid, "/usr/local/bin/desktop-ready", "--initial", timeout=4)
+        if not probe.returncode:
+            return info
+        time.sleep(0.35)
+    raise DesktopError("desktop window manager or Chromium did not become ready")
+
+
+def run(op, user, sandbox, node=None, policy_stream=None):
+    user, sandbox = identifier(user), identifier(sandbox)
+    if op in ("start", "configure"):
+        node = identifier(node)
+    with ownership(user, sandbox, claim=op in ("start", "configure")) as directory:
+        info = inspect(sandbox, user)
+        if op == "configure":
+            if info and info["State"]["Running"]:
+                raise DesktopError("stop the desktop before configuring a node")
+            configure(sandbox, node, policy_stream if policy_stream is not None else sys.stdin.buffer)
+            return {"user_id": user, "sandbox_id": sandbox, "node_id": node, "desktop": "stopped",
+                    "network": "offline", "configured": True}
+        if op == "start":
+            # A node mismatch is an ordinary admission rejection; preserve the current session.
+            if info and info["State"]["Running"] and info["Config"]["Labels"][LABEL + "node"] != node:
+                raise DesktopError("stop the desktop before changing its bound node")
+            try:
+                info = open_desktop(user, sandbox, node, directory, info)
+            except (DesktopError, OSError):
+                stop(sandbox, inspect(sandbox, user))
+                raise
+        elif op == "stop":
+            stop(sandbox, info)
+            info = None
+        running = bool(info and info["State"]["Running"])
+        return {"user_id": user, "sandbox_id": sandbox,
+                "node_id": info["Config"]["Labels"][LABEL + "node"] if info else None,
+                "desktop": "running" if running else "stopped",
+                "network": network_state(sandbox) if running else "offline"}
+
+
+def main(args):
+    try:
+        if os.geteuid() != 0:
+            raise DesktopError("root is required")
+        os.umask(0o077)
+        if not ((len(args) == 4 and args[0] in ("start", "configure")) or
+                (len(args) == 3 and args[0] in ("status", "stop"))):
+            raise ValueError("usage: desktop start/configure USER SANDBOX NODE | desktop stop/status USER SANDBOX")
+        print(json.dumps(run(*args)))
+    except (DesktopError, ValueError, OSError) as exc:
+        print(json.dumps({"error": str(exc)}))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

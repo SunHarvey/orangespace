@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+archive=/var/lib/orangespace/seed/desktop.tar
+if [ -f "$archive" ]; then
+    docker load -i "$archive"
+    docker image inspect orangespace/desktop:dev >/dev/null
+    rm -- "$archive"
+else
+    docker image inspect orangespace/desktop:dev >/dev/null
+fi

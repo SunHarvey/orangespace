@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""Extend a verified Moby syscall profile for Chromium's unprivileged namespace sandbox."""
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+EXPECTED = "9c1025c88ccaa517b648da571961838744ea2137f176bfe6a48b21294cae9c76"
+
+def profile(source):
+    raw = source.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != EXPECTED:
+        raise ValueError("unexpected Moby default.json digest")
+    result = json.loads(raw)
+    # With all initial container capabilities dropped the Moby profile excludes
+    # chroot. Chromium uses it after entering its own user namespace and gaining
+    # SYS_CHROOT there. The kernel continues to check the calling namespace.
+    result["syscalls"].append({"names": ["chroot"], "action": "SCMP_ACT_ALLOW"})
+    # Linux clone flags are argument 0 on the x86-64 / arm64 guest targets.
+    # Keep the outer networking and mount namespaces owned by the guest agent.
+    new_user = 0x10000000
+    new_pid = 0x20000000
+    new_net = 0x40000000
+    new_ns = 0x00020000
+    new_cgroup = 0x02000000
+    new_uts = 0x04000000
+    new_ipc = 0x08000000
+    forbidden = new_ns | new_cgroup | new_uts | new_ipc
+    result["syscalls"].append({
+        "names": ["clone"], "action": "SCMP_ACT_ALLOW",
+        "args": [{"index": 0, "value": forbidden, "valueTwo": 0, "op": "SCMP_CMP_MASKED_EQ"}],
+    })
+    # unshare is needed when the zygote drops access to the filesystem/network.
+    for flags in (new_user, new_pid, new_net, new_user | new_pid, new_user | new_net,
+                  new_pid | new_net, new_user | new_pid | new_net, 0x200):
+        result["syscalls"].append({
+            "names": ["unshare"], "action": "SCMP_ACT_ALLOW",
+            "args": [{"index": 0, "value": flags, "op": "SCMP_CMP_EQ"}],
+        })
+    return result
+
+if __name__ == "__main__":
+    try:
+        print(json.dumps(profile(Path(sys.argv[1])), indent=2))
+    except (IndexError, OSError, ValueError) as exc:
+        sys.exit(f"seccomp profile generation failed: {exc}")
