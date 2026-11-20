@@ -1,4 +1,6 @@
-# 架构与必须保持的约束
+# 原生 Windows 方案架构（已退役）
+
+> 2026-11-20 起不再采用：显式代理只能转发 TCP，UDP 无法按沙盒经节点出网，也没有完整桌面。现行架构见 `docs/architecture.md`，选型理由见 `docs/proposal-wsl-linux-desktop.md`。下文保留退役时的原文。
 
 ## 目标
 

@@ -6,11 +6,11 @@
 
 **远方的网络，眼前的工作空间。**
 
-Windows 上的多个独立浏览工作区，分别使用指定 Linux 节点的网络；同一节点上的多用户分别拥有自己的个人文件区。浏览器程序共用，Cookie、登录状态及网站数据按沙盒保存在 Windows 本机。
+Windows 上同时运行多个沙盒，每个沙盒是一个窗口里的完整 Linux 桌面（任务栏、文件管理器、Chromium），文件和浏览器数据各自独立；每个沙盒的全部网络流量只经它绑定的 Linux 节点出网，不同沙盒可用不同节点。同一节点上的多用户分别拥有自己的个人文件区。
 
-联网路线是“显式代理 + 每沙盒 WFP 兜底”：每个沙盒的浏览器只通过本沙盒 sing-box helper 的本机认证代理上网，WFP 规则按沙盒的 AppContainer 只放行到该代理端口的 TCP，其余全部阻断。详见 [架构说明](docs/architecture.md) 和 [路线图](docs/roadmap.md)。
+沙盒运行在 Windows 自带的 WSL2 中、本项目自己的 Debian 发行版里：每个沙盒一个容器、一个私有显示窗口（WSLg）和一个网关网络命名空间，网关经 TUIC 连到绑定节点，出口许可随节点租约续期、到期由内核自动断开。详见 [架构说明](docs/architecture.md)、[路线图](docs/roadmap.md) 与 [选型方案](docs/proposal-wsl-linux-desktop.md)。
 
-**当前处于 P0 收敛阶段，主线还不能打开浏览器。** 可用的是本机沙盒管理、节点文件 API、每沙盒独立 TUIC helper；浏览器启动链在 P1 接入。
+**2026-11-20 起改为 WSL2 Linux 桌面路线，当前处于 L0 定案阶段。** 原生 Windows CEF/WFP 方案（下表中标为“退役”的部分）已在测试机跑通，但无法让 UDP 经节点、也没有完整桌面，不再推进。
 
 | 部分 | 当前实现 |
 |---|---|
@@ -18,8 +18,9 @@ Windows 上的多个独立浏览工作区，分别使用指定 Linux 节点的�
 | 本机数据 | SQLite 元数据，每沙盒独立 profile/cache/tasks；关闭、切换节点保留，删除才清理 |
 | TUIC | sing-box 1.14.4 配置生成；真实双节点 TCP/UDP 回环集成测试；尚未接入 Windows 流量捕获 |
 | Linux 节点与中心 | Python/FastAPI、SQLAlchemy/Alembic、MySQL、中心身份和节点授权、个人文件 API；实际 RDS 资料待提供 |
-| Windows 网络防护 | 按 AppContainer 包 SID 的 WFP 规则库（`drivers/wfp-prototype`），仅在原型服务中使用；P1 并入主服务 |
-| 浏览器 | 固定 CEF 版本；显式代理 BrowserHost 目前只在原型（`apps/windows-client/prototype`）中，P1 并入主线 |
+| Linux 桌面沙盒 | 新路线。分支 `feat/linux-desktop-sandboxes` 的每沙盒网关回归已在 WSL2 内核通过；WSL2 中每沙盒完整桌面窗口与 fcitx5 中文输入已做可行性验证。见路线图 L1–L3 |
+| Windows 网络防护（退役） | `apps/windows-service/sandbox`：按程序路径或包 SID 的 WFP 规则与读回核实，`orangespace-netcheck` 实测通过 |
+| 浏览器（退役） | `apps/browserhost`：CEF 156 BrowserHost 以原生子窗口嵌入，`tools/sandbox-devlaunch` 双沙盒实测显示；服务 op 10 与客户端内嵌代码完成 |
 | 客户端登录 | 管理窗口接入受保护中心配置、中心 HTTPS SDK、授权节点、DPAPI 与本机 SQLite；真实 GUI 完整流程验收仍待完成 |
 | helper 生命周期 | 每沙盒独立 TUIC helper、LocalSystem Service 独立授权、精确停止；短时双沙盒真实链路通过，GUI 多租约周期与 WFP 分开验收 |
 | 浏览器文件桥 | 已确定接口与任务归属规则；尚未接入浏览器文件选择、下载回调 |
@@ -30,6 +31,9 @@ Windows 上的多个独立浏览工作区，分别使用指定 Linux 节点的�
 
 ```text
 apps/windows-client/          Windows 管理器、客户端模型、CEF 组件
+apps/browserhost/             每沙盒一个的 CEF BrowserHost（子窗口嵌入、管道协议）
+apps/windows-service/sandbox/ 每沙盒运行时、Job 启动、WFP 规则与读回核实
+tools/sandbox-devlaunch/      开发用双沙盒启动器与 WFP/会话实测工具（不分发）
 crates/orangespace-core/      绑定模型、helper 监督、任务归属及 TUIC 配置
 crates/orangespace-broker/    本地 SQLite 和 JSON CLI
 drivers/wfp-prototype/       按 AppContainer 包 SID 的 WFP 规则库
