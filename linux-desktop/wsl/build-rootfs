@@ -1,0 +1,61 @@
+#!/bin/sh
+# Builds the OrangeSpace WSL distribution root filesystem.
+#
+#   sudo linux-desktop/wsl/build-rootfs <output.tar.gz>
+#
+# Run as root on Debian (or in a Debian WSL distribution) with mmdebstrap,
+# curl and ca-certificates installed. Writes:
+#   <output.tar.gz>                for `wsl --import OrangeSpace <dir> <output.tar.gz> --version 2`
+#   <output.tar.gz>.packages.tsv   every installed package with its source package and version
+#                                  (distribution manifest; the matching sources are in the
+#                                  Debian archive / snapshot.debian.org)
+#   <output.tar.gz>.sha256
+# The output must not exist yet. Nothing user-specific goes into the image.
+set -eu
+
+OUT=${1:?usage: build-rootfs <output.tar.gz>}
+case "$OUT" in *.tar.gz) ;; *) echo "output must end in .tar.gz" >&2; exit 2 ;; esac
+[ ! -e "$OUT" ] || { echo "$OUT already exists" >&2; exit 2; }
+[ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 2; }
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+SRC=$(dirname "$HERE")                       # linux-desktop/
+OUT=$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")
+SUITE=trixie
+MIRROR=${ORANGESPACE_DEBIAN_MIRROR:-http://deb.debian.org/debian}
+
+# sing-box is not packaged in Debian. Pinned release archive; the SHA-256 was
+# recorded from the official GitHub release on 2026-11-20 (upstream publishes
+# no checksum file), so any change to the archive is detected.
+SINGBOX_VERSION=1.14.4
+SINGBOX_SHA256=699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT INT TERM
+ARCHIVE="$WORK/sing-box.tar.gz"
+curl -fsSL -o "$ARCHIVE" \
+  "https://github.com/SagerNet/sing-box/releases/download/v$SINGBOX_VERSION/sing-box-$SINGBOX_VERSION-linux-amd64.tar.gz"
+echo "$SINGBOX_SHA256  $ARCHIVE" | sha256sum -c - >/dev/null
+tar -xzf "$ARCHIVE" -C "$WORK"
+SINGBOX="$WORK/sing-box-$SINGBOX_VERSION-linux-amd64/sing-box"
+
+REVISION=${ORANGESPACE_REVISION:-$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)}
+
+PACKAGES=systemd,systemd-sysv,dbus,dbus-user-session,python3,podman,uidmap,nftables,iproute2,procps,\
+ca-certificates,locales,xserver-xephyr,x11-xserver-utils,xauth
+
+mmdebstrap --variant=minbase --arch=amd64 --include="$PACKAGES" \
+  --customize-hook='echo orangespace > "$1/etc/hostname"' \
+  --customize-hook="cp '$HERE/wsl.conf' \"\$1/etc/wsl.conf\"" \
+  --customize-hook='chroot "$1" useradd --create-home --uid 1000 --shell /bin/bash desk' \
+  --customize-hook='sed -i "s/^# *zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/; s/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/" "$1/etc/locale.gen" && chroot "$1" locale-gen >/dev/null' \
+  --customize-hook="install -m 0755 '$SINGBOX' \"\$1/usr/local/bin/sing-box\"" \
+  --customize-hook="mkdir -p \"\$1/opt/orangespace\" && cp -a '$SRC/bridge' '$SRC/guest' '$SRC/network' '$SRC/wsl' \"\$1/opt/orangespace/\"" \
+  --customize-hook="find \"\$1/opt/orangespace\" -name '__pycache__' -prune -exec rm -rf {} + ; echo '$REVISION' > \"\$1/opt/orangespace/REVISION\"" \
+  --customize-hook='chown -R root:root "$1/opt/orangespace" && chmod -R go-w "$1/opt/orangespace"' \
+  --customize-hook="chroot \"\$1\" dpkg-query -W -f='\${Package}\t\${Version}\t\${source:Package}\t\${source:Version}\n' > '$OUT.packages.tsv'" \
+  --customize-hook='rm -rf "$1/var/cache/apt/archives"/*.deb "$1/var/lib/apt/lists"/*' \
+  "$SUITE" "$OUT" "$MIRROR"
+
+( cd "$(dirname "$OUT")" && sha256sum "$(basename "$OUT")" > "$(basename "$OUT").sha256" )
+echo "built $OUT ($(wc -l < "$OUT.packages.tsv") packages, revision $REVISION)"

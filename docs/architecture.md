@@ -26,7 +26,7 @@ flowchart LR
       DB -->|唯一 veth| GB
       AG --> SA & SB & GA & GB
     end
-    C <-->|wsl.exe 标准输入/输出上的认证帧| AG
+    C <-->|wsl.exe 子进程的标准输入/输出| AG
     XA & XB -->|WSLg| WIN["每个沙盒一个 Windows 窗口"]
   end
   GA -->|TUIC 租约 A| NA["节点 A"]
@@ -38,7 +38,7 @@ flowchart LR
 
 - 负责中心登录、授权节点、沙盒的创建/绑定/打开/停止/删除、节点租约的创建与续租、节点个人文件面板。凭据用当前用户的 DPAPI 保存。不使用 LocalSystem 服务。
 - 管理 WSL 发行版 `OrangeSpace`：检查 WSL 可用，首次运行用 `wsl --import` 导入，**从用户的交互会话中启动**（WSLg 只连接最先启动 WSL 的会话），常驻一个 `wsl.exe` 控制进程（否则发行版会被自动停止），退出时正常关闭。
-- 控制通道是 `wsl.exe -d OrangeSpace -u root -- /opt/orangespace/agent` 的标准输入/输出，帧格式带长度与并发上限、双向认证；不开端口、不建命名管道。
+- 控制通道是客户端启动的 `wsl.exe -d OrangeSpace -u root -- python3 /opt/orangespace/wsl/agent.py` 子进程的标准输入/输出（`linux-desktop/wsl/agent.py`、`apps/windows-client/include/orangespace/wsl_channel.hpp`）。管道只属于客户端进程，持有管道即认证；不开端口、不建命名管道。代理先输出同步标记，客户端跳过 wsl.exe 可能打印的提示后再按帧（类型、编号、长度，载荷不超过 64 KiB）收发 JSON 请求与回复。
 
 ## 发行版 OrangeSpace
 

@@ -26,6 +26,16 @@
 
 ## L1 运行底座
 
+状态（2026-11-20）：代码完成，测试虚拟机验收通过；物理机体验待测。
+
+已完成的部分：
+- `linux-desktop/wsl/`：`build-rootfs`（289 MB，248 个软件包，附清单与 SHA-256）、`wsl.conf`、`agent.py` 及其测试。
+- `apps/windows-client`：`wsl_channel.hpp`（帧编解码，含测试）、`wsl_runtime`（导入、从交互会话启动、请求、关闭），以及验收工具 `orangespace-wsl`。
+
+测试机实测（从全新导入开始）：代理约 4 秒启动；不挂载任何 Windows 磁盘；无法运行 Windows 程序；systemd 与 WSLg 可用；常驻 20 秒后正常关闭。客户端界面接入随 L2 一起做。
+
+计划：
+
 - **构建根文件系统**：用 mmdebstrap 构建 `OrangeSpace` 的 Debian 13 根文件系统，内含客体代理、Podman、sing-box、网关、Xephyr、LXQt、Chromium、fcitx5。`wsl.conf` 开启 systemd，关闭自动挂载与互操作。同时输出软件包清单。
 - **客户端管理 WSL**：检测 WSL 是否可用，`wsl --import` 导入，从交互会话启动，常驻控制进程，正常关闭。
 - **控制通道**：客体代理经 `wsl.exe` 的标准输入/输出与客户端通信，沿用分支 bridge 的认证帧协议。

@@ -76,7 +76,7 @@ flowchart LR
   - 首次运行时用 `wsl --import` 导入我们的发行版 `OrangeSpace`；
   - **从用户的交互会话中**启动它（WSLg 只连接最先启动 WSL 的会话），并常驻一个 `wsl.exe` 进程（否则发行版会被自动停止）；
   - 退出时正常关闭。
-- **控制通道**：客户端启动 `wsl.exe -d OrangeSpace -u root -- /opt/orangespace/agent`，经它的标准输入/输出传送分支已有的认证帧协议（帧长度与并发上限）。不需要额外的命名管道或端口。
+- **控制通道**：客户端启动 `wsl.exe -d OrangeSpace -u root -- python3 /opt/orangespace/wsl/agent.py`，经它的标准输入/输出传送分支 `bridge/wire.py` 的帧格式。管道只属于客户端进程，持有管道即认证，不再需要分支里按虚拟机启动密钥做的双向认证；也不需要额外的命名管道或端口。
 - **Windows 服务**：见第 9 节决策 3。WSL 发行版按 Windows 用户注册，LocalSystem 服务不便直接管理；本方案默认由客户端直接管理，服务不再参与浏览器/网络路径。
 
 ### 4.2 发行版 `OrangeSpace`
