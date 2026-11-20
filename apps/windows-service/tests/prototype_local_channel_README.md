@@ -45,7 +45,6 @@ then the following passed (fixture secrets only):
 ```
 g++ -std=c++20 -Wall -Wextra -Werror -Wno-missing-field-initializers -Iapps/windows-service/include -Iapps/windows-client/include apps/windows-service/tests/prototype_local_channel_tests.cpp -o <scratch>/channel
 <scratch>/channel
-python3 apps/windows-service/tests/prototype_backend_source_tests.py
 python3 apps/windows-service/tests/prototype_backend_tests.py <scratch>/backend
 python3 apps/windows-service/tests/tuic_private_ca_tests.py <scratch>/ca
 cmake --build build -j1

@@ -1,0 +1,12 @@
+if(NOT WIN32)
+  return()
+endif()
+add_library(orangespace_sandbox STATIC appcontainer_win.cpp browser_win.cpp firewall_win.cpp launch_win.cpp runtime_win.cpp)
+target_include_directories(orangespace_sandbox PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}"
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../browserhost" "${CMAKE_CURRENT_SOURCE_DIR}/../../windows-client/include")
+target_compile_features(orangespace_sandbox PUBLIC cxx_std_20)
+target_compile_definitions(orangespace_sandbox PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
+target_link_libraries(orangespace_sandbox PUBLIC fwpuclnt rpcrt4 advapi32 userenv user32)
+if(MSVC)
+  target_compile_options(orangespace_sandbox PRIVATE /W4 /WX /utf-8)
+endif()

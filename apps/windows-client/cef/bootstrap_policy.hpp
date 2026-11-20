@@ -4,8 +4,8 @@
 #include <string_view>
 
 namespace orangespace::cef_host {
-// Compatibility is not authorization. Only launch_denied leaves this phase's
-// entry point after compatibility validation; no service-ready boolean exists.
+// Compatibility is not authorization: launch still requires the Service's
+// per-sandbox helper + WFP readback. No readiness boolean exists.
 enum class StartupResult : int {
   compatible = 0,
   invalid_sandbox = 20,
@@ -44,9 +44,5 @@ inline StartupResult CheckRuntime(const char* api, const char* commit,
       full_version != expected.full_version)
     return StartupResult::invalid_runtime;
   return StartupResult::compatible;
-}
-
-inline StartupResult CompileOnlyLaunchDecision() {
-  return StartupResult::launch_denied;
 }
 }  // namespace orangespace::cef_host

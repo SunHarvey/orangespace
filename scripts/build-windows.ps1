@@ -19,8 +19,7 @@ try {
     Copy-Item "build/windows/apps/windows-client/$Configuration/OrangeSpaceLogin.exe" $Output
     Copy-Item "build/windows/apps/windows-service/$Configuration/OrangeSpaceService.exe" $Output
     Copy-Item 'target/release/orangespace-broker.exe' $Output
-    Copy-Item "build/windows/drivers/wfp-baseline/$Configuration/orangespace-wfp-baseline.exe" $Output
-    Write-Host "Development manager created at $Output. Browser networking remains blocked."
+    Write-Host "Development manager created at $Output. BrowserHost is not included yet (P1)."
 } finally {
     Pop-Location
 }

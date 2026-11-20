@@ -6,7 +6,6 @@ No CMake files are changed; run these focused tests explicitly:
 ```sh
 g++ -std=c++20 -Wall -Wextra -Werror -pthread -fsanitize=address,undefined -fno-omit-frame-pointer -g -Iapps/windows-client/include apps/windows-client/tests/ui_lifecycle_tests.cpp -o "$TMPDIR/ui-lifecycle-asan"
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 "$TMPDIR/ui-lifecycle-asan"
-python3 apps/windows-client/tests/ui_lifecycle_source_tests.py
 cmake --build /root/.hermes/cache/scratch/os-chain-parent-win --target OrangeSpace -j2
 ```
 

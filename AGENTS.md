@@ -1,10 +1,11 @@
 # OrangeSpace 开发约定
 
-- 先读 `README.md`、`docs/architecture.md`、`docs/verification.md`，区分真实已实现能力与尚未完成部分。
-- Windows 客户端用 C++20/CEF，路由核心和 broker 用 Rust，Linux 文件节点用 Python/FastAPI。不要改成远程浏览器或画面传输方案。
-- 用户/沙盒/节点/连接代次必须显式绑定；不能引入全局 current_node，或跨沙盒共用会话。
-- WFP/DNS/进程身份管控未完成时不得开放浏览器，不加入 no-sandbox、allow-unsafe 或本机直连回退。
-- Linux 个人文件区按认证用户隔离，同用户同节点共享；删除本机沙盒不删除远端文件。
+- 先读 `README.md`、`docs/architecture.md`、`docs/roadmap.md`，区分已实现能力与尚未完成部分。`docs/archive/` 是旧路线的历史记录，不作为现行约束。
+- Windows 客户端用 C++20/CEF，路由核心和 broker 用 Rust，Linux 文件节点用 Python/FastAPI。不要改成远程浏览器或画面传输方案。每个沙盒的浏览器运行在该沙盒自己的 BrowserHost 进程中，以原生子窗口嵌入客户端的沙盒标签；不改为离屏渲染传画面，也不让多个沙盒共用一个浏览器进程。
+- 用户/沙盒/节点/连接代次必须显式绑定；不能引入全局 current_node，或跨沙盒共用会话、代理端口或代理凭据。
+- 联网路线是“显式代理 + 每沙盒 WFP 兜底”，不开发内核重定向驱动。浏览器启动前必须满足：本沙盒 helper 已认证就绪、该沙盒 AppContainer 的 WFP 规则已安装并读回核实（仅允许 TCP 到本沙盒代理端口）。任一条件不满足或运行中失效，浏览器不启动或立即断网。
+- 不加入 no-sandbox、allow-unsafe、关闭证书验证或本机直连回退。浏览器 UDP（QUIC/WebRTC 直连）一律阻断。
+- Linux 个人文件区按认证用户隔离，同用户同节点共享；删除本机沙盒不删除远端文件。文件任务在创建时固定 node_id。
 - 不复制 IdenGrid 源码。不要将用户凭据、私钥、Profile、临时文件纳入仓库。
-- 修改路由或文件权限边界时运行相关测试；跨平台模型测试和 TUIC 回环测试不能宣称 Windows WFP 已通过。
+- 测试验证行为，不新增读取源码文本做字符串断言的测试。修改路由或文件权限边界时运行相关测试；跨平台模型测试和 TUIC 回环测试不能宣称 Windows WFP 已通过。
 - 当前工程没有对外分发许可证，未经用户决定不要替项目添加开源许可。

@@ -14,5 +14,21 @@ int main(){
   auto frame=pp::request_frame(7,"{\"auth_id\":\"22222222-2222-4222-8222-222222222222\",\"sandbox_id\":\"33333333-3333-4333-8333-333333333333\"}");
   assert(pp::parse_request(frame).op==7);frame[3]='2';denied([&]{pp::parse_request(frame);});
   frame=pp::request_frame(2,"{\"auth_id\":\"22222222-2222-4222-8222-222222222222\"}");denied([&]{pp::parse_request(frame);});
+  // Op 10 browser_open: exact binding + container window, nothing else.
+  const std::string binding="{\"user_id\":\"44444444-4444-4444-8444-444444444444\",\"sandbox_id\":\"33333333-3333-4333-8333-333333333333\",\"node_id\":\"11111111-1111-4111-8111-111111111111\",\"generation\":2,\"tunnel_id\":\"55555555-5555-4555-8555-555555555555\"}";
+  const std::string auth="\"auth_id\":\"22222222-2222-4222-8222-222222222222\"";
+  frame=pp::request_frame(10,"{"+auth+",\"binding\":"+binding+",\"container_window\":131234}");
+  {auto r=pp::parse_request(frame);assert(r.op==10);}
+  frame[3]='2';denied([&]{pp::parse_request(frame);});                       // not an OSP2 operation
+  denied([&]{service::chain::parse_request(frame);});
+  for(const std::string body:{"{"+auth+",\"binding\":"+binding+"}",                      // no window
+                              "{"+auth+",\"binding\":"+binding+",\"container_window\":0}",
+                              "{"+auth+",\"binding\":"+binding+",\"container_window\":-5}",
+                              "{"+auth+",\"binding\":"+binding+",\"container_window\":1.5}",
+                              "{"+auth+",\"binding\":"+binding+",\"container_window\":7,\"url\":\"\"}", // extra field
+                              "{"+auth+",\"container_window\":7,\"sandbox_id\":\"33333333-3333-4333-8333-333333333333\"}",
+                              "{\"auth_id\":\"nope\",\"binding\":"+binding+",\"container_window\":7}"})
+    denied([&]{pp::parse_request(pp::request_frame(10,body));});
+  denied([&]{pp::request_frame(11,"{}");});
   std::cout<<"platform policy: passed (portable model, not native HTTPS/IPC)\n";
 }

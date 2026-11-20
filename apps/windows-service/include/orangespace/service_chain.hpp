@@ -146,6 +146,15 @@ struct Backend {
   virtual bool alive(std::string_view realm, const Binding&) = 0;
   virtual bool diagnose(std::string_view, const Binding&, const LeaseBudget&) {return false;}
   virtual void renew(std::string_view realm, const Binding&,const RenewResult& renewal) = 0;
+  // Opens this binding's browser for the requesting client (OS-verified peer
+  // and pipe client process) inside `container_window`, and returns the reply
+  // body (command/event pipe handle values valid in the client process).
+  // Portable/legacy backends cannot open browsers.
+  virtual std::string open_browser(std::string_view, const Binding&, const Peer&, std::uint32_t /*client_pid*/,
+                                   std::uint64_t /*container_window*/) {
+    nd::require(false);
+    return {};
+  }
 };
 struct Cursor { std::string sandbox; std::uint64_t generation{}; };
 struct Persisted {std::string sandbox,sid;std::uint64_t generation{};std::string central_user{};};
@@ -570,6 +579,26 @@ public:
     return {it->first,it->second.generation};
   }
   // Read-only, one-shot evidence. Never enters status/poll cleanup or caches proof.
+  // Browser open is bound to the exact live tuple the caller owns: same peer,
+  // same authorization realm, same generation and lease authority. The backend
+  // is called outside the Engine lock (it starts processes).
+  std::string browser_open(const Peer& p,std::string_view id,const Binding& requested,std::uint32_t client_pid,
+                           std::uint64_t container_window) {
+    peer(p); std::shared_ptr<Auth> a; Binding b;
+    {
+      std::lock_guard lock(mutex_);a=get(id);
+      nd::require(a->adopted);
+      const auto it=a->tunnels.find(requested.sandbox);
+      nd::require(it!=a->tunnels.end() && it->second==requested && !a->unadopted.contains(requested.sandbox));
+      b=it->second;
+      std::lock_guard space(namespace_->mutex);
+      const auto r=namespace_->records.find(b.sandbox);
+      nd::require(r!=namespace_->records.end() && Namespace::owns(r->second,p) && r->second.realm==a->id &&
+        r->second.generation==b.generation && r->second.binding && r->second.binding->same_authority(b) &&
+        b.deadline_ms>monotonic_() && b.server_expiry>now_());
+    }
+    return backend_.open_browser(a->id,b,p,client_pid,container_window);
+  }
   std::string diagnose(const Peer& p,std::string_view id,const Binding& requested) {
     peer(p); std::shared_ptr<Auth> a; Binding b; LeaseBudget budget;
     auto matches=[&] {

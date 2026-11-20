@@ -66,7 +66,7 @@ impl Drop for Fixture {
 #[test]
 fn streaming_real_tls_contract() {
     let mut child = Fixture(
-        Command::new("python3")
+        Command::new(if cfg!(windows) { "python" } else { "python3" })
             .arg(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/transfer_fixture.py"

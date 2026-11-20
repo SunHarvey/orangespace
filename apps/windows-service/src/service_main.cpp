@@ -143,7 +143,9 @@ void run_service() {
     if (current_peer().sid != "S-1-5-18") throw std::runtime_error("LocalSystem service context required");
     if (install_service_process_job() != ERROR_SUCCESS) throw std::runtime_error("service process Job required");
     ProcessObservationAcl observation_acl;
-    auto backend = make_platform_chain_backend();
+    // Helpers expose an authenticated HTTP/CONNECT inbound (Chromium cannot
+    // authenticate to SOCKS5) and browsers open through Op 10 (browser_open).
+    auto backend = make_prototype_platform_chain_backend();
     auto space = make_chain_namespace();
     std::map<DWORD, std::unique_ptr<Worker>> workers;
     while (WaitForSingleObject(service_stop.get(), 0) == WAIT_TIMEOUT) {

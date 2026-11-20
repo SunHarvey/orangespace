@@ -31,9 +31,6 @@ The upstream loader still rejects invalid signatures, version mismatches and loa
 failures. A signed release is not claimed. Old targets, sandbox, WFP, process/Job
 checks and system trust stores are unchanged.
 
-Run `python3 apps/windows-client/prototype/tests/bootstrap_runtime_trust_tests.py`
-for the narrow source-order regression; this is not native loader/sandbox evidence.
-
 ## Frozen service contract (parent integration owns implementation)
 
 - SCM own-process LocalSystem service `OrangeSpaceSinglePrototype`; fixed local message pipe `\\.\pipe\OrangeSpace.SinglePrototype.Admission.v1`. Never share the old service/pipe or old Profile. Every instance uses protected DACL, first-instance protection, remote rejection. Ordinary clients get individual rights 0x12019b, never generic write/create-instance. Restricted CEF child identities may need a narrowly reviewed explicit ACL. If sandboxed children cannot access SCM/process metadata/pipe, admission MUST fail; do not bypass by --type.

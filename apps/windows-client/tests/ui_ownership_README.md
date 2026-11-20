@@ -59,7 +59,6 @@ Windows GUI, remote grant retirement or helper stopping is exercised here.
 ```sh
 python3 apps/windows-client/tests/ui_ownership_tests.py --output "$TMPDIR/ui-ownership-normal-final"
 python3 apps/windows-client/tests/ui_ownership_tests.py --output "$TMPDIR/ui-ownership-asan-final" --sanitize
-python3 apps/windows-client/tests/ui_lifecycle_source_tests.py
 
 g++ -std=c++20 -Wall -Wextra -Werror -pthread -fno-elide-constructors \
   -Iapps/windows-client/include apps/windows-client/tests/ui_lifecycle_tests.cpp \

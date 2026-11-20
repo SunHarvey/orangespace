@@ -15,7 +15,7 @@ impl Fixture {
         Self::with_mode("valid")
     }
     fn with_mode(mode: &str) -> Self {
-        let mut child = Command::new("python3")
+        let mut child = Command::new(if cfg!(windows) { "python" } else { "python3" })
             .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/tls_fixture.py"))
             .arg(mode)
             .stdin(Stdio::piped())

@@ -142,6 +142,14 @@ auto exchange(chain::Op op, std::string_view payload,const ExpectedReply& expect
         if (!bound(service.get(), process.get(), pipe.get(), initial->pid)) throw std::runtime_error("authenticated service IPC failed");
         // Strict schema, identity and prior cursor checks precede ownership ACK.
         auto root=[&]() -> std::optional<json::Value> {
+            if(static_cast<unsigned>(op)==10) {
+                node_session::detail::require(protocol==3 && expected.exact.has_value() && response_size>=4);
+                std::uint32_t length{};for(unsigned i=0;i<4;++i)length|=std::uint32_t(response[i])<<(8*i);
+                node_session::detail::require(length==response_size-4);
+                const std::string_view text(reinterpret_cast<const char*>(response.data()+4),length);
+                if(!validate_browser_open_reply(text,*expected.exact))return std::nullopt;
+                return json::parse(text);
+            }
             if(static_cast<unsigned>(op)!=9)return validate_chain_frame(std::span<const std::uint8_t>(response.data(),response_size),static_cast<unsigned>(op)==7?chain::Op::stop:op,expected);
             node_session::detail::require(protocol==3 && expected.prior.has_value() && response_size>=4);
             std::uint32_t length{};for(unsigned i=0;i<4;++i)length|=std::uint32_t(response[i])<<(8*i);
@@ -231,6 +239,22 @@ std::vector<chain::Binding> active_tunnels(const Grant& g) {
     },g.protocol());
 }
 void check_status(const Grant& g) { (void)active_tunnels(g); }
+BrowserOpenReply open_browser(const Grant& g,const chain::Binding& binding,std::uint64_t container_window) {
+    namespace nd=node_session::detail;
+    nd::require(g.protocol()==3 && binding.user==g.user() && binding.node==g.node() && container_window!=0);
+    const std::string payload="{\"auth_id\":"+chain::quote(g.id())+",\"binding\":"+chain::binding_json(binding)+
+        ",\"container_window\":"+std::to_string(container_window)+"}";
+    ExpectedReply expected{g.id(),g.user(),g.node(),chain::Cursor{binding.sandbox,binding.generation}};
+    expected.exact=binding;
+    return exchange(static_cast<chain::Op>(10),payload,expected,[&](const json::Value& root) {
+        BrowserOpenReply reply{static_cast<std::uint64_t>(nd::integer(nd::field(root,"commands"))),
+                               static_cast<std::uint64_t>(nd::integer(nd::field(root,"events")))};
+        // Both must already be pipe handles in this process, duplicated by the Service.
+        for(const auto value:{reply.commands,reply.events})
+            nd::require(GetFileType(reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(value)))==FILE_TYPE_PIPE);
+        return reply;
+    },3);
+}
 TunnelDiagnosticDTO diagnose_tunnel(const AuthGrant& g,const chain::Binding& binding) {
     namespace nd=node_session::detail;
     nd::require(binding.user==g.user() && binding.node==g.node() && nd::uuid(binding.user) &&

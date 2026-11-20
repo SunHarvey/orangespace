@@ -2,8 +2,13 @@
 
 C++20 SCM service with legacy OSP1 foundation status and an OSP2 authorization/helper
 integration. **Not a usable secure browser.** OSP2 independently restores node sessions,
-controls the statically linked Rust runtime, and is wired into the management UI. Browser-open
-still always returns `browser_guard_unavailable`; there is no readiness/unsafe bypass.
+controls the statically linked Rust runtime, and is wired into the management UI. The OSP1
+browser-open command still returns `browser_guard_unavailable`. Browsers open only through OSP3
+op 10 `browser_open` on an exact live binding: the Service verifies the pipe client process
+is the authorized peer and owns the container window, prepares `sandboxes\<id>\`, installs
+and reads back that image path's proxy-only WFP rules, starts BrowserHost with the session
+user's token, writes the credential-bearing config line itself, and only then duplicates the
+command/event pipe ends into the client (`apps/windows-service/sandbox/browser_win.*`).
 The OSP2 code has portable policy and MinGW link evidence, **not native chain acceptance**.
 The private runtime renewal contract remains an integration blocker; see below.
 
@@ -228,7 +233,7 @@ User-SID observation spans logons, existing handles cannot be revoked, and privi
 concurrent descriptor updates have no atomic compare-and-swap guarantee.
 
 Exact evidence, reproduction and unverified cases are in
-[`docs/service-ipc-validation.md`](../../docs/service-ipc-validation.md). This is still
+[`docs/archive/service-ipc-validation.md`](../../docs/archive/service-ipc-validation.md). This is still
 secret-free status IPC, not completed Phase 1, credential IPC, helper containment or WFP.
 
 Microsoft API references:

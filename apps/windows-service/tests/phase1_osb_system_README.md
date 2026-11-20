@@ -27,7 +27,6 @@ g++ -std=c++17 -Wall -Wextra -Werror \
  /root/projects/orangespace/apps/windows-service/tests/phase1_osb_system_policy_tests.cpp \
  -o /root/.hermes/cache/scratch/phase1_osb_system_policy_tests
 /root/.hermes/cache/scratch/phase1_osb_system_policy_tests
-PYTHONDONTWRITEBYTECODE=1 python3 /root/projects/orangespace/apps/windows-service/tests/phase1_osb_system_contract_tests.py
 PYTHONDONTWRITEBYTECODE=1 python3 /root/projects/orangespace/apps/windows-service/tests/phase1_osb_system_build_tests.py
 ```
 

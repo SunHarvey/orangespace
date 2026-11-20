@@ -33,11 +33,11 @@ inline void match_catalog(const NodeRef& n,const nd::NodeEntry& pin) {
   nd::require(n.api_origin==explicit_origin||(pin.port==443&&n.api_origin==default_origin));
 }
 inline std::vector<std::uint8_t> request_frame(std::uint8_t op,std::string_view body) {
-  nd::require(op>=1&&op<=9);auto result=ch::request_frame(static_cast<ch::Op>(op),body);result[3]='3';return result;
+  nd::require(op>=1&&op<=10);auto result=ch::request_frame(static_cast<ch::Op>(op),body);result[3]='3';return result;
 }
 struct Request {std::uint8_t op;nd::JsonGuard body;Request(std::uint8_t op_,std::string_view text):op(op_),body(text){}};
 inline Request parse_request(std::span<const std::uint8_t> bytes) {
-  nd::require(bytes.size()>=12&&bytes.size()<=12+ch::max_payload&&bytes[0]=='O'&&bytes[1]=='S'&&bytes[2]=='P'&&bytes[3]=='3'&&bytes[4]>=1&&bytes[4]<=9&&bytes[5]==0&&bytes[6]==0&&bytes[7]==0);
+  nd::require(bytes.size()>=12&&bytes.size()<=12+ch::max_payload&&bytes[0]=='O'&&bytes[1]=='S'&&bytes[2]=='P'&&bytes[3]=='3'&&bytes[4]>=1&&bytes[4]<=10&&bytes[5]==0&&bytes[6]==0&&bytes[7]==0);
   std::uint32_t size{};for(unsigned i=0;i<4;++i)size|=std::uint32_t(bytes[8+i])<<(8*i);nd::require(size==bytes.size()-12);
   std::string_view text(reinterpret_cast<const char*>(bytes.data()+12),size);nd::require(nd::safe_utf8(text));nd::exact_wire_integers(text);
   Request r(bytes[4],text);const auto& v=r.body.value;
@@ -45,7 +45,9 @@ inline Request parse_request(std::span<const std::uint8_t> bytes) {
   else {
     nd::require(nd::uuid(nd::text(nd::field(v,"auth_id"))));
     const auto* obj=std::get_if<json::Value::Object>(&v.data);nd::require(obj);
-    if(r.op==9){nd::object(v,4);ch::validate_binding_dto(nd::field(v,"binding"));const auto command=nd::integer(nd::field(v,"command"),0);nd::require(command<=6);const auto& url=nd::text(nd::field(v,"url"));nd::require(url.size()<=2048);if(command==1){nd::require(url.starts_with("https://")||url.starts_with("http://"));for(unsigned char c:url)nd::require(c>=32&&c!=127);}else nd::require(url.empty());}
+    // 10 = browser_open: the exact binding plus the client's container window.
+    if(r.op==10){nd::object(v,3);ch::validate_binding_dto(nd::field(v,"binding"));nd::require(nd::integer(nd::field(v,"container_window"),1)>0);}
+    else if(r.op==9){nd::object(v,4);ch::validate_binding_dto(nd::field(v,"binding"));const auto command=nd::integer(nd::field(v,"command"),0);nd::require(command<=6);const auto& url=nd::text(nd::field(v,"url"));nd::require(url.size()<=2048);if(command==1){nd::require(url.starts_with("https://")||url.starts_with("http://"));for(unsigned char c:url)nd::require(c>=32&&c!=127);}else nd::require(url.empty());}
     else if(r.op==8){nd::object(v,2);ch::validate_binding_dto(nd::field(v,"binding"));}
     else if(r.op==2||r.op==3){nd::object(v,3);nd::require(nd::uuid(nd::text(nd::field(v,"sandbox_id"))));(void)nd::integer(nd::field(v,"expected_generation"),0);}
     else if(r.op==7||(r.op==5&&obj->size()==2)){nd::object(v,2);nd::require(nd::uuid(nd::text(nd::field(v,"sandbox_id"))));}

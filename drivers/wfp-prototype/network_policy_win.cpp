@@ -11,7 +11,7 @@
 
 namespace orangespace::wfp_prototype {
 namespace {
-// Independent namespace: never share keys with wfp-baseline.
+// Independent WFP key namespace owned by OrangeSpace.
 const GUID provider = {0xdbad11e1,0x68a7,0x4db4,{0x89,0x54,0xee,0x8d,0xca,0x2a,0x43,0x21}};
 const GUID sublayer = {0xdbad11e2,0x68a7,0x4db4,{0x89,0x54,0xee,0x8d,0xca,0x2a,0x43,0x21}};
 GUID key(unsigned slot) { auto g = provider; g.Data1 = 0xdbad1200 + slot; return g; }

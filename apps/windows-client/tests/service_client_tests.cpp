@@ -187,6 +187,24 @@ int main(int argc, char** argv) {
         if(field==4)++mismatch.generation;
         check(!decode_tunnel_diagnostic(frame(diagnostic),mismatch,1000,1200),"each full tuple mismatch rejected");
     }
+    {
+        // Op 10 browser_open reply: exact binding echo + two distinct handle values.
+        const std::string open_binding=R"({"user_id":"11111111-1111-4111-8111-111111111111","sandbox_id":"44444444-4444-4444-8444-444444444444","node_id":"22222222-2222-4222-8222-222222222222","tunnel_id":"55555555-5555-4555-8555-555555555555","generation":8})";
+        const std::string good="{\"ok\":true,\"browser_allowed\":true,\"binding\":"+open_binding+",\"commands\":1204,\"events\":1208}";
+        const auto opened=validate_browser_open_reply(good,diagnostic_binding);
+        check(opened && opened->commands==1204 && opened->events==1208,"browser_open reply accepted");
+        auto variant=[&](std::string from,std::string to){auto t=good;t.replace(t.find(from),from.size(),to);return t;};
+        for(const auto& bad:{variant("\"browser_allowed\":true","\"browser_allowed\":false"),
+                             variant("\"ok\":true","\"ok\":false"),
+                             variant("1208","1204"),                       // same handle twice
+                             variant("1208","0"),variant("1204","-4"),variant("1204","12.5"),
+                             variant("\"generation\":8","\"generation\":9"),
+                             variant("55555555-5555-4555-8555-555555555555","66666666-6666-4666-8666-666666666666"),
+                             variant(",\"events\":1208",""),
+                             variant("\"events\":1208","\"events\":1208,\"extra\":1"),
+                             good.substr(0,good.size()-1)})
+            check(!validate_browser_open_reply(bad,diagnostic_binding),"malformed or foreign browser_open reply rejected");
+    }
     check(!decode(diagnostic,1000,9000),"deadline equality rejected");
     check(!decode(diagnostic,1000,6000),"original 5000ms budget equality rejected");
     check(!decode(diagnostic,1200,1000),"reversed samples rejected");

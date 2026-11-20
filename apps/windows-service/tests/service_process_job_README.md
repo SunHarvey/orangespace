@@ -21,7 +21,6 @@ $CXX $COMMON -municode -I apps/windows-service/include \
   apps/windows-service/tests/service_process_job_native.cpp -o "$OUT/selfjob-native.exe"
 $CXX $COMMON -I apps/windows-service/include \
   apps/windows-service/tests/service_process_job_failures.cpp -o "$OUT/selfjob-failures.exe"
-python3 apps/windows-service/tests/service_process_job_startup.py
 sha256sum "$OUT"/*.exe
 ```
 

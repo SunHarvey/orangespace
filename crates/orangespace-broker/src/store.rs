@@ -59,13 +59,13 @@ fn real_directory(path: &Path) -> Result<(), StoreError> {
         }
         Ok(_) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let mut builder = fs::DirBuilder::new();
             #[cfg(unix)]
             {
                 use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
+                fs::DirBuilder::new().mode(0o700).create(path)?;
             }
-            builder.create(path)?;
+            #[cfg(not(unix))]
+            fs::DirBuilder::new().create(path)?;
             Ok(())
         }
         Err(error) => Err(error.into()),

@@ -36,7 +36,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Rust build failed' }
     $runtime = Join-Path $rust 'release/orangespace_runtime.lib'
     if (!(Test-Path -LiteralPath $runtime -PathType Leaf)) { throw 'Native MSVC runtime archive required' }
-    & cmake -S $repo -B $native -A x64 "-DORANGESPACE_RUNTIME_LIBRARY=$runtime" -DORANGESPACE_WITH_CEF=OFF
+    & cmake -S $repo -B $native -A x64 "-DORANGESPACE_RUNTIME_LIBRARY=$runtime"
     if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
     & cmake --build $native --config Release --parallel 1 --target OrangeSpace OrangeSpaceLogin OrangeSpaceService
     if ($LASTEXITCODE -ne 0) { throw 'Native program build failed' }

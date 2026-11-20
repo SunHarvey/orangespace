@@ -8,35 +8,36 @@
 
 Windows 上的多个独立浏览工作区，分别使用指定 Linux 节点的网络；同一节点上的多用户分别拥有自己的个人文件区。浏览器程序共用，Cookie、登录状态及网站数据按沙盒保存在 Windows 本机。
 
-这是第一阶段开发代码，**当前可管理本机沙盒、运行节点文件 API、验证独立 TUIC 通道；尚不能作为安全联网浏览器使用。** Windows 的完整 CEF 宿主、WFP TCP/UDP 接管和 DNS 防泄漏尚未完成，因此“打开浏览器”始终拒绝，仓库没有解除该限制的调试开关。
+联网路线是“显式代理 + 每沙盒 WFP 兜底”：每个沙盒的浏览器只通过本沙盒 sing-box helper 的本机认证代理上网，WFP 规则按沙盒的 AppContainer 只放行到该代理端口的 TCP，其余全部阻断。详见 [架构说明](docs/architecture.md) 和 [路线图](docs/roadmap.md)。
+
+**当前处于 P0 收敛阶段，主线还不能打开浏览器。** 可用的是本机沙盒管理、节点文件 API、每沙盒独立 TUIC helper；浏览器启动链在 P1 接入。
 
 | 部分 | 当前实现 |
 |---|---|
 | Windows 客户端 | C++20 原生管理器：新建、列表、绑定节点、关闭、删除沙盒；实际调用 Rust broker |
 | 本机数据 | SQLite 元数据，每沙盒独立 profile/cache/tasks；关闭、切换节点保留，删除才清理 |
-| 独立路由 | Rust 类型和状态机：用户/沙盒/节点/连接代次绑定，TCP 流与 UDP 关联映射，失效回包拒绝 |
 | TUIC | sing-box 1.14.4 配置生成；真实双节点 TCP/UDP 回环集成测试；尚未接入 Windows 流量捕获 |
 | Linux 节点与中心 | Python/FastAPI、SQLAlchemy/Alembic、MySQL、中心身份和节点授权、个人文件 API；实际 RDS 资料待提供 |
-| Windows 网络防护 | WFP 持久阻断基础工具；新增 SCM Service/受限 IPC 和 DPAPI 原语，尚未接管实际流量 |
-| 完整浏览器 | 固定 CEF 版本与独立 bootstrap/client.dll compile-only 构建链；不是完整浏览器，默认不参与构建 |
+| Windows 网络防护 | 按 AppContainer 包 SID 的 WFP 规则库（`drivers/wfp-prototype`），仅在原型服务中使用；P1 并入主服务 |
+| 浏览器 | 固定 CEF 版本；显式代理 BrowserHost 目前只在原型（`apps/windows-client/prototype`）中，P1 并入主线 |
 | 客户端登录 | 管理窗口接入受保护中心配置、中心 HTTPS SDK、授权节点、DPAPI 与本机 SQLite；真实 GUI 完整流程验收仍待完成 |
 | helper 生命周期 | 每沙盒独立 TUIC helper、LocalSystem Service 独立授权、精确停止；短时双沙盒真实链路通过，GUI 多租约周期与 WFP 分开验收 |
 | 浏览器文件桥 | 已确定接口与任务归属规则；尚未接入浏览器文件选择、下载回调 |
 
-管理窗口身份来自中心认证回复，授权节点来自中心 API；CLI 的 UUID 参数仍仅用于本机开发操作。Web 管理后台与 Windows 本机沙盒管理器是独立入口，Linux 不运行浏览器。当前管理开发版交付独立于浏览器/WFP 里程碑：源码构建、真实 GUI、短时隧道正控、持续租约和系统网络隔离分别记录，不能相互替代。干净源码三包构建见 [开发包构建](deploy/packages/README.md)，其余阶段见 [分阶段交付](docs/delivery-plan.md)。
+管理窗口身份来自中心认证回复，授权节点来自中心 API；CLI 的 UUID 参数仍仅用于本机开发操作。Web 管理后台与 Windows 本机沙盒管理器是独立入口，Linux 不运行浏览器。干净源码三包构建见 [开发包构建](deploy/packages/README.md)，后续阶段见 [路线图](docs/roadmap.md)。
 
 ## 目录
 
 ```text
 apps/windows-client/          Windows 管理器、客户端模型、CEF 组件
-crates/orangespace-core/      沙盒、路由、任务归属及 TUIC 配置
+crates/orangespace-core/      绑定模型、helper 监督、任务归属及 TUIC 配置
 crates/orangespace-broker/    本地 SQLite 和 JSON CLI
-drivers/wfp-baseline/        真实的 block-only WFP 策略工具（不是接管驱动）
+drivers/wfp-prototype/       按 AppContainer 包 SID 的 WFP 规则库
 server/                     Linux 多用户个人文件 API
 deploy/                     systemd、Caddy 和 Unbound 配置
 scripts/                    Windows 构建、节点配置生成、真实 TUIC 烟测
 assets/brand/               用户确定的 Logo 原图
-docs/                       架构、当前验证记录和 Windows 验收条件
+docs/                       架构、路线图；docs/archive/ 为旧路线历史记录
 ```
 
 ## 本机开发验证
@@ -68,7 +69,7 @@ Windows 11 x64 安装 VS2022 C++ 工具、Windows SDK、Rust 和 CMake 后：
 ./artifacts/windows-dev/OrangeSpace.exe
 ```
 
-该构建产物是开发管理器，不含可联网 CEF 浏览器。Windows 原生模型、登录响应校验、DPAPI/IPC 和 SCM 启停已在 Windows 11 build 26200 执行部分验收；管理窗口交互及完整浏览器/网络验收尚未完成，详见 [Windows 验证](docs/windows-validation.md)。
+该构建产物是开发管理器，暂不含 BrowserHost（P1 接入）。旧路线下的 Windows 实机验证记录见 [docs/archive](docs/archive/README.md)。
 
 ## 运行节点与隧道验证
 
@@ -83,6 +84,6 @@ python3 scripts/smoke_tuic.py --sing-box /absolute/path/to/sing-box
 
 它测试同一目标地址经两个通道得到不同节点回包、并发 TCP/native UDP、一侧节点失效不影响另一侧，以及防护未完成时 broker 拒绝打开浏览器。它**不证明** Windows 已接管流量或 DNS 无泄漏。
 
-部署草案见 [部署说明](deploy/README.md)，授权测试节点的隔离部署与来源核验见 [节点验证](docs/node-staging-validation.md)，整体边界见 [架构说明](docs/architecture.md)，实际运行结果见 [验证记录](docs/verification.md)。GitHub Actions 提供 Linux/Windows 构建、测试和隧道检查，执行结果以仓库 Actions 页面为准。
+部署草案见 [部署说明](deploy/README.md)，授权测试节点的隔离部署与来源核验见 [节点验证](docs/archive/node-staging-validation.md)，整体边界见 [架构说明](docs/architecture.md)。GitHub Actions 提供 Linux/Windows 构建、测试和隧道检查，执行结果以仓库 Actions 页面为准。
 
 本仓库独立编写；IdenGrid 只作为架构参考，未复制其代码。第三方组件和品牌资源说明见 [THIRD_PARTY.md](THIRD_PARTY.md)。

@@ -223,7 +223,7 @@ def gnu_commands(work, rust, development_install_id=''):
          '-DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++-posix',
          '-DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres',
          '-DCMAKE_EXE_LINKER_FLAGS=-static -static-libgcc -static-libstdc++',
-         '-DORANGESPACE_WITH_CEF=OFF', f'-DORANGESPACE_DEVELOPMENT_INSTALL_ID={development_install_id}', f'-DORANGESPACE_RUNTIME_LIBRARY={runtime}'],
+         f'-DORANGESPACE_DEVELOPMENT_INSTALL_ID={development_install_id}', f'-DORANGESPACE_RUNTIME_LIBRARY={runtime}'],
         ['cmake', '--build', str(native), '--parallel', '1', '--target',
          'OrangeSpace', 'OrangeSpaceLogin', 'OrangeSpaceService'],
     ]

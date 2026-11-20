@@ -2,7 +2,7 @@
 
 This native C++20 component and console diagnostic remain independently testable.
 The management UI now calls the same trusted loader/login API; see
-`docs/windows-login-ui.md`. Source integration and policy tests are **not a
+`docs/archive/windows-login-ui.md`. Source integration and policy tests are **not a
 completed successful-login or interactive Windows acceptance**. This component
 neither launches browsers nor configures WFP/DNS or bypasses any guard.
 No IdenGrid code or new third-party dependency is used.

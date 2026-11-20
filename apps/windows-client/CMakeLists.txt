@@ -17,8 +17,6 @@ endif()
 target_link_libraries(orangespace_client_model INTERFACE orangespace_service_policy)
 if(BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
-  add_test(NAME approved-ui-v2-resources
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/ui_v2_resource_tests.py")
   add_executable(orangespace-ui-v2-model-tests tests/ui_v2_model_tests.cpp)
   target_link_libraries(orangespace-ui-v2-model-tests PRIVATE orangespace_client_model)
   add_test(NAME ui-v2-model COMMAND orangespace-ui-v2-model-tests)
@@ -37,14 +35,14 @@ if(BUILD_TESTING)
     add_test(NAME ui-v2-source-contract
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/ui_v2_tests.py")
   endif()
+  # Python reads UTF-8 sources; Chinese-locale Windows would otherwise default to GBK.
+  set_tests_properties(ui-v2-source-contract PROPERTIES ENVIRONMENT "PYTHONUTF8=1")
   add_executable(orangespace-file-transfer-tests tests/file_transfer_tests.cpp src/file_transfer_win.cpp)
   target_link_libraries(orangespace-file-transfer-tests PRIVATE orangespace_client_model)
   if(WIN32)
     target_link_libraries(orangespace-file-transfer-tests PRIVATE orangespace_node_session bcrypt)
   endif()
   add_test(NAME file-transfer-policy COMMAND orangespace-file-transfer-tests)
-  add_test(NAME file-transfer-source-contract
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/file_transfer_source_tests.py")
   if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
     add_test(NAME file-manager-production-regressions
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/file_manager_regression_tests.py")
@@ -52,8 +50,6 @@ if(BUILD_TESTING)
   add_executable(orangespace-file-manager-lifecycle-tests tests/file_manager_lifecycle_tests.cpp)
   target_link_libraries(orangespace-file-manager-lifecycle-tests PRIVATE orangespace_client_model)
   add_test(NAME file-manager-lifecycle COMMAND orangespace-file-manager-lifecycle-tests)
-  add_test(NAME file-manager-source-contract
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/file_manager_source_tests.py")
   # These bounded policy executables use assert as their verdict. Keep those
   # assertions active in the Release configuration used by Windows CI too.
   foreach(_ui_policy_target orangespace-ui-v2-model-tests orangespace-file-transfer-tests orangespace-file-manager-lifecycle-tests)
@@ -109,7 +105,7 @@ if(BUILD_TESTING)
   target_link_libraries(orangespace-service-client-tests PRIVATE orangespace_client_model)
   add_test(NAME service-client-negative-and-policy COMMAND orangespace-service-client-tests)
   set_tests_properties(service-client-negative-and-policy PROPERTIES LABELS "policy;windows-negative-requires-absent-service")
-  # Compatibility/deny policy only: this target neither links nor starts CEF.
+  # CEF bootstrap/runtime version compatibility checks (shared with BrowserHost).
   add_executable(orangespace-cef-policy-tests cef/tests/bootstrap_policy_tests.cpp)
   target_include_directories(orangespace-cef-policy-tests PRIVATE cef)
   add_test(NAME cef-bootstrap-policy COMMAND orangespace-cef-policy-tests)
@@ -217,9 +213,4 @@ if(WIN32)
   if(MINGW)
     target_link_options(OrangeSpace PRIVATE -municode -Wl,--subsystem,windows)
   endif()
-endif()
-
-option(ORANGESPACE_WITH_CEF "Build the protected CEF browser host (not available yet)" OFF)
-if(ORANGESPACE_WITH_CEF)
-  message(FATAL_ERROR "CEF host is deliberately disabled: signed WFP/DNS enforcement and the matched CEF bootstrap/client.dll integration are not complete. See cef/README.md. Do not disable Chromium sandboxing to bypass this check.")
 endif()

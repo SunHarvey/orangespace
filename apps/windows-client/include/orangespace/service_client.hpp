@@ -28,6 +28,7 @@ inline void validate_proof(const json::Value& v) {
 struct ExpectedReply {
     std::string auth, user, node;
     std::optional<chain::Cursor> prior;
+    std::optional<chain::Binding> exact{};  // browser_open: the full binding the reply must echo
 };
 inline std::optional<json::Value> validate_chain_frame(std::span<const std::uint8_t> bytes, chain::Op op,const ExpectedReply& expected={}) {
     namespace nd = node_session::detail;
@@ -202,6 +203,23 @@ inline TunnelDiagnosticDTO finish_tunnel_diagnostic(TunnelDiagnosticDTO&& observ
     return std::move(observed);
 }
 // Select only an explicit raw-frame preparation path; legacy callbacks keep
+// Op 10 (browser_open) reply: the Service opened this exact binding's browser
+// and duplicated two pipe ends into the calling process. The values are handle
+// numbers in the caller; the Windows caller additionally checks they are pipes.
+struct BrowserOpenReply { std::uint64_t commands{}, events{}; };
+inline std::optional<BrowserOpenReply> validate_browser_open_reply(std::string_view text,const chain::Binding& expected) {
+    namespace nd=node_session::detail;
+    try {
+        nd::require(text.size()<=4096 && nd::safe_utf8(text));
+        nd::exact_wire_integers(text);
+        auto root=json::parse(text);nd::object(root,5);
+        nd::require(nd::field(root,"ok").is_true() && nd::field(root,"browser_allowed").is_true());
+        nd::require(validate_binding(nd::field(root,"binding"))==expected);
+        const auto commands=nd::integer(nd::field(root,"commands")),events=nd::integer(nd::field(root,"events"));
+        nd::require(commands!=events);
+        return BrowserOpenReply{static_cast<std::uint64_t>(commands),static_cast<std::uint64_t>(events)};
+    } catch (...) {return {};}
+}
 // receiving the validated DOM. Both construct the final owner before ACK.
 template<bool RawFrame=false,class Prepare>
 auto prepare_chain_result(const json::Value& root,std::span<const std::uint8_t> raw,Prepare&& prepare) {
@@ -241,6 +259,10 @@ void logout(const Grant&);
 void retire(const Grant&);
 void check_status(const Grant&);
 std::vector<chain::Binding> active_tunnels(const Grant&);
+// Asks the Service to open `binding`'s browser as a child of `container_window`
+// (a window of this process). Returns pipe handles owned by the caller:
+// commands = write end of the BrowserHost's stdin, events = read end of its stdout.
+BrowserOpenReply open_browser(const Grant&,const chain::Binding&,std::uint64_t container_window);
 #endif
 // Deliberately not a BrowserPermit, authentication result, or a readiness boolean.
 enum class FoundationStatus { locked_foundation };

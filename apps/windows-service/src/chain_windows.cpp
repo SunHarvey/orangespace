@@ -2,10 +2,15 @@
 #include "orangespace/platform_protocol.hpp"
 #include "orangespace/prototype_namespace.hpp"
 #include "orangespace/windows_service.hpp"
+#include "orangespace/pipe_server.hpp"
+#include "browser_win.hpp"
 #include <aclapi.h>
+#include <shlobj.h>
+#include <wtsapi32.h>
 #include <sddl.h>
 #include <bcrypt.h>
 #include <chrono>
+#include <filesystem>
 #include <set>
 #ifdef ORANGESPACE_NATIVE_ACCEPTANCE_TRACE
 #include <cstdio>
@@ -273,6 +278,17 @@ class WindowsBackend final : public PrototypePlatformBackend {
     ~Realm() {if(runtime) os_runtime_free(runtime);}
   };
   std::map<std::string,std::shared_ptr<Realm>,std::less<>> realms_;
+  // Browsers, keyed by "<realm>/<sandbox>". Declared after the firewall so they
+  // are destroyed (process tree killed) before its WFP session closes.
+  std::mutex browser_mutex_;
+  std::unique_ptr<sandbox::SandboxFirewall> firewall_;
+  std::map<std::string,std::unique_ptr<sandbox::SandboxBrowser>> browsers_;
+  static std::string browser_key(std::string_view realm,const Binding& b) { return std::string(realm)+"/"+b.sandbox; }
+  void close_browser(std::string_view realm,const Binding& b) noexcept {
+    std::unique_ptr<sandbox::SandboxBrowser> doomed;
+    {std::lock_guard lock(browser_mutex_);auto it=browsers_.find(browser_key(realm,b));if(it==browsers_.end())return;doomed=std::move(it->second);browsers_.erase(it);}
+    doomed.reset(); // kills the tree, then removes its rules
+  }
   struct OrdinaryInvalid {}; // fixed, non-secret, allocation-free private FFI outcome
   std::string call(void* runtime_,std::string_view request) {
     std::array<std::uint8_t,65536> out{};
@@ -529,6 +545,7 @@ public:
     return true;
   }
   void close(std::string_view realm,const Binding& b) noexcept override {
+    close_browser(realm,b); // the browser never outlives its helper binding
     try {
       std::shared_ptr<Realm> state; bool submitted=false;
       {
@@ -574,6 +591,51 @@ public:
     (void)renewed_deadline(old,renewal,detail::monotonic_ms());
     active->second.server_expiry=renewal.expires_at;active->second.deadline_ms=deadline;
   }
+  std::string open_browser(std::string_view realm,const Binding& b,const Peer& peer,std::uint32_t client_pid,
+                           std::uint64_t container_window) override {
+    detail::require(prototype_mixed_ && platform_mode_ && client_pid!=0);
+    {std::lock_guard lock(browser_mutex_);detail::require(!browsers_.contains(browser_key(realm,b)));}
+    // The client process must be the authorized peer itself (same user, session
+    // and logon), identified by the OS, not by the request.
+    Handle client(OpenProcess(PROCESS_DUP_HANDLE|PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,client_pid));
+    detail::require(static_cast<bool>(client));
+    {
+      HANDLE raw{};detail::require(OpenProcessToken(client.get(),TOKEN_QUERY,&raw));Handle token(raw);
+      detail::require(authorize_peer(peer,token_peer(token.get())));
+    }
+    HANDLE raw_user{};detail::require(WTSQueryUserToken(peer.session,&raw_user));Handle user(raw_user);
+    detail::require(authorize_peer(peer,token_peer(user.get())));
+    // Per-user, per-sandbox profile, created as the user (owner = user).
+    PWSTR local=nullptr;
+    detail::require(SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData,KF_FLAG_DEFAULT,user.get(),&local)) && local);
+    std::wstring profile(local);CoTaskMemFree(local);
+    profile+=L"\\OrangeSpace\\sandboxes\\"+std::wstring(b.sandbox.begin(),b.sandbox.end())+L"\\profile";
+    {
+      detail::require(ImpersonateLoggedOnUser(user.get()));
+      std::error_code ec;std::filesystem::create_directories(profile,ec);
+      if(!RevertToSelf())TerminateProcess(GetCurrentProcess(),ERROR_CANNOT_IMPERSONATE);
+      detail::require(!ec);
+    }
+    auto channel=take_local_channel(realm,b); // once per binding; wiped on scope exit
+    sandbox::LocalProxy proxy;
+    proxy.port=channel.port;proxy.username=std::string(channel.username.view());proxy.password=std::string(channel.password.view());
+    sandbox::BrowserOpen request;
+    request.sandbox_id=b.sandbox;
+    request.client_process=client.get();
+    request.container_window=container_window;
+    request.shared_runtime=installation()+L"browser";
+    request.sandbox_root=installation()+L"sandboxes";
+    request.profile_dir=profile;
+    request.launch=sandbox::LaunchAsUser(user.get());
+    std::lock_guard lock(browser_mutex_);
+    detail::require(!poisoned_ && !browsers_.contains(browser_key(realm,b)));
+    if(!firewall_)firewall_=std::make_unique<sandbox::SandboxFirewall>();
+    auto browser=std::make_unique<sandbox::SandboxBrowser>(*firewall_,request,proxy);
+    const auto pipes=browser->pipes();
+    browsers_.emplace(browser_key(realm,b),std::move(browser));
+    return "{\"ok\":true,\"browser_allowed\":true,\"binding\":"+binding_json(b)+
+      ",\"commands\":"+std::to_string(pipes.commands)+",\"events\":"+std::to_string(pipes.events)+"}";
+  }
   bool diagnose(std::string_view realm,const Binding& b,const LeaseBudget& budget) override {
     budget.validate(detail::monotonic_ms());
     auto state=reserved(realm,b);std::lock_guard io(state->io);
@@ -598,6 +660,13 @@ public:
     exact();return fresh;
   }
   bool alive(std::string_view realm,const Binding& b) override {
+    {
+      // Rules altered behind our back => cut this sandbox off before anything else.
+      std::lock_guard lock(browser_mutex_);
+      if(auto it=browsers_.find(browser_key(realm,b));it!=browsers_.end() && !it->second->verify()) {
+        it->second->cut();return false;
+      }
+    }
     auto state=reserved(realm,b);std::lock_guard io(state->io);
     if(state->retired || !state->runtime)return false;
     {
@@ -645,6 +714,10 @@ chain::Response dispatch_platform_chain(chain::Engine& engine,const Peer& peer,s
   if(request.op==1) {
     const auto selected=platform::parse_node(detail::field(root,"node"));
     return engine.authorize_response(peer,selected.node_id,std::string_view(reinterpret_cast<const char*>(bytes.data()+12),bytes.size()-12));
+  }
+  if(request.op==10) {
+    return engine.browser_open(peer,detail::text(detail::field(root,"auth_id")),parse_binding(detail::field(root,"binding")),
+      current_client_pid(),static_cast<std::uint64_t>(detail::integer(detail::field(root,"container_window"))));
   }
   if(request.op==7) {
     const auto cursor=engine.register_sandbox(peer,detail::text(detail::field(root,"auth_id")),detail::text(detail::field(root,"sandbox_id")));

@@ -51,6 +51,14 @@ bool verified_peer(HANDLE pipe, const Peer& expected) {
     catch (...) { return false; }
 }
 }
+namespace {
+thread_local std::uint32_t handler_client_pid = 0;
+struct ClientPidScope {
+    explicit ClientPidScope(std::uint32_t pid) { handler_client_pid = pid; }
+    ~ClientPidScope() { handler_client_pid = 0; }
+};
+}
+std::uint32_t current_client_pid() noexcept { return handler_client_pid; }
 bool connect_pipe(HANDLE pipe, HANDLE stop) {
     Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     if (!event) return false;
@@ -80,6 +88,9 @@ bool serve_owned_connection(HANDLE pipe, const Peer& expected, HANDLE stop, cons
     chain::Response owned;
     if (!command) {
         if (!handler) return false;
+        ULONG client_pid = 0;
+        if (!GetNamedPipeClientProcessId(pipe, &client_pid)) client_pid = 0;
+        ClientPidScope scope(client_pid);
         try { owned = handler(bytes); }
         catch (...) { owned = chain::Response(R"({"ok":false,"error":"authorization_rejected","browser_allowed":false})"); }
     }

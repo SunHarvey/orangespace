@@ -83,7 +83,6 @@ The builder requires an already installed GNU MinGW compiler and Python standard
 
 ```
 python3 apps/windows-service/tests/phase1_task_identity_builder_tests.py
-python3 apps/windows-service/tests/phase1_task_identity_source_tests.py
 g++ -std=c++20 -Wall -Wextra -Werror apps/windows-service/tests/phase1_task_identity_policy_tests.cpp -o <own-scratch>/policy-tests
 <own-scratch>/policy-tests
 python3 apps/windows-service/tests/phase1_task_identity_build.py --input <protected-local-input.json> --out <new-own-scratch-build>

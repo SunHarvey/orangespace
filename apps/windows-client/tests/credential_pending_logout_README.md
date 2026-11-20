@@ -74,7 +74,6 @@ From the repository root:
 ```sh
 g++ -std=c++20 -Wall -Wextra -Werror -pthread -fsanitize=address,undefined -fno-omit-frame-pointer -g -Iapps/windows-client/include apps/windows-client/tests/credential_pending_logout_tests.cpp -o "$TMPDIR/pending-logout-asan"
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 "$TMPDIR/pending-logout-asan"
-python3 apps/windows-client/tests/credential_pending_logout_source_tests.py
 x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -Wextra -Werror -DUNICODE -D_UNICODE -DWIN32_LEAN_AND_MEAN -DNOMINMAX -D_WIN32_WINNT=0x0A00 -static -static-libgcc -static-libstdc++ -Iapps/windows-client/include apps/windows-client/tests/credential_pending_logout_native_win.cpp apps/windows-client/src/node_session_win.cpp -lwinhttp -ladvapi32 -lcrypt32 -lshell32 -lole32 -lbcrypt -luuid -o "$TMPDIR/credential-pending-logout-native.exe"
 ```
 

@@ -22,6 +22,5 @@ int main() {
   if (CheckRuntime("wrong", "commit", "sandbox", "version", hashes) != StartupResult::invalid_runtime) return 9;
   if (CheckRuntime("api", "commit", "sandbox", "wrong", hashes) != StartupResult::invalid_runtime) return 10;
   if (CheckRuntime("api", "commit", "sandbox", "version", hashes) != StartupResult::compatible) return 11;
-  if (CompileOnlyLaunchDecision() != StartupResult::launch_denied) return 12;
-  std::cout << "CEF bootstrap policy: sandbox/version/hash rejection and unconditional launch denial passed\n";
+  std::cout << "CEF bootstrap policy: sandbox/version/hash checks passed\n";
 }

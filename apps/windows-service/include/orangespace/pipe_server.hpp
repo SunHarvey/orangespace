@@ -4,4 +4,8 @@
 namespace orangespace::service::win {
 using OwnedChainHandler=std::function<chain::Response(std::span<const std::uint8_t>)>;
 bool serve_owned_connection(HANDLE,const Peer&,HANDLE,const OwnedChainHandler&);
+// While a handler runs: the OS process id of the pipe client whose message is
+// being handled (GetNamedPipeClientProcessId), 0 outside a handler. Callers
+// must still verify that process's token against the authorized Peer.
+std::uint32_t current_client_pid() noexcept;
 }
