@@ -14,6 +14,8 @@ Anything the agent logs goes to stderr, never stdout.
 """
 import concurrent.futures
 import json
+import subprocess
+import uuid
 import os
 from pathlib import Path
 import sys
@@ -24,6 +26,8 @@ from wire import Channel, encode, REPLY, REQUEST  # noqa: E402
 
 MARKER = b"OrangeSpace-WSL-Agent-v1\n"
 VERSION = 1
+DESKTOP = Path(__file__).resolve().parent.parent / "guest" / "desktop"
+MAX_NODE_CONFIG = 32768
 
 
 class StdioPort:
@@ -93,12 +97,77 @@ def facts():
     }
 
 
+def canonical(value, what):
+    if not isinstance(value, str) or str(uuid.UUID(value)) != value:
+        raise ValueError(f"invalid {what}")
+    return value
+
+
 class Agent:
-    def __init__(self, channel):
+    def __init__(self, channel, desktop=DESKTOP):
         self.ch = channel
+        self.desktop = str(desktop)
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
         self.ending = threading.Event()
-        self.ops = {"ping": self.ping, "facts": lambda request: facts(), "shutdown": self.shutdown}
+        self.started = {}          # sandbox -> user, for stopping on disconnect
+        self.started_lock = threading.Lock()
+        self.ops = {"ping": self.ping, "facts": lambda request: facts(), "shutdown": self.shutdown,
+                    "desktop.start": self.desktop_start, "desktop.stop": self.desktop_simple,
+                    "desktop.status": self.desktop_simple, "desktop.delete": self.desktop_simple,
+                    "desktop.configure": self.desktop_configure}
+
+    def run_desktop(self, args, stdin=None, timeout=150):
+        """guest/desktop prints one JSON object; its per-sandbox lock serializes
+        competing requests for the same sandbox."""
+        try:
+            # Never let the child inherit our stdin: it is the client's control channel.
+            proc = subprocess.run([self.desktop, *args], input=stdin if stdin is not None else b"",
+                                  capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("desktop operation timed out") from None
+        try:
+            result = json.loads(proc.stdout)
+        except ValueError:
+            raise RuntimeError("desktop operation failed") from None
+        if not isinstance(result, dict) or proc.returncode:
+            raise RuntimeError(str((result.get("error") if isinstance(result, dict) else None)
+                                   or "desktop operation failed")[:240])
+        return result
+
+    def desktop_start(self, request):
+        user, sandbox = canonical(request["user"], "user"), canonical(request["sandbox"], "sandbox")
+        node, title = canonical(request["node"], "node"), request["title"]
+        if not isinstance(title, str):
+            raise ValueError("invalid window title")
+        with self.started_lock:
+            self.started[sandbox] = user
+        return self.run_desktop(["start", user, sandbox, node, title])
+
+    def desktop_simple(self, request):
+        op = request["op"].split(".", 1)[1]
+        user, sandbox = canonical(request["user"], "user"), canonical(request["sandbox"], "sandbox")
+        result = self.run_desktop([op, user, sandbox])
+        if op in ("stop", "delete"):
+            with self.started_lock:
+                self.started.pop(sandbox, None)
+        return result
+
+    def desktop_configure(self, request):
+        user, sandbox = canonical(request["user"], "user"), canonical(request["sandbox"], "sandbox")
+        node, settings = canonical(request["node"], "node"), request["settings"]
+        if not isinstance(settings, str) or len(settings.encode("utf-8")) > MAX_NODE_CONFIG:
+            raise ValueError("node configuration must be UTF-8 text of at most 32768 bytes")
+        return self.run_desktop(["configure", user, sandbox, node], stdin=settings.encode("utf-8"), timeout=20)
+
+    def stop_started(self):
+        """The client went away: no desktop outlives its control channel."""
+        with self.started_lock:
+            started, self.started = dict(self.started), {}
+        for sandbox, user in started.items():
+            try:
+                self.run_desktop(["stop", user, sandbox])
+            except (RuntimeError, OSError):
+                pass
 
     def ping(self, request):
         return {"ready": not self.ending.is_set(), "agent_version": VERSION}
@@ -147,6 +216,7 @@ class Agent:
         finally:
             self.ending.set()
             self.pool.shutdown(wait=True, cancel_futures=True)
+            self.stop_started()
 
 
 def main():

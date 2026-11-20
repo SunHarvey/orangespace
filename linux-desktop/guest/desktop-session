@@ -1,8 +1,10 @@
 #!/bin/sh
 set -eu
-# Composite Qt's ARGB windows onto the X11 root so both local rooted XWin and
+# Composite Qt's ARGB windows onto the X11 root so the nested X server and
 # root-frame capture display their contents on 24-bit screens.
 xcompmgr -n &
+# The input method must own its D-Bus name before applications start.
+fcitx5 -d --replace
 startlxqt &
 session=$!
 chromium --no-first-run --no-default-browser-check --ozone-platform=x11 about:blank &

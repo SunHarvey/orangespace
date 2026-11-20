@@ -5,6 +5,7 @@ import struct
 import subprocess
 import sys
 import unittest
+import uuid
 
 AGENT = Path(__file__).resolve().parent / "agent.py"
 MARKER = b"OrangeSpace-WSL-Agent-v1\n"
@@ -79,6 +80,85 @@ class AgentTest(unittest.TestCase):
     def test_closing_stdin_ends_the_agent(self):
         self.agent.proc.stdin.close()
         self.assertEqual(self.agent.proc.wait(5), 0)
+
+
+sys.path.insert(0, str(AGENT.parent))
+import agent as agent_module  # noqa: E402
+
+
+class FakeChannel:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, kind, number, payload=b""):
+        self.sent.append((kind, number, json.loads(payload)))
+
+
+class DesktopOpsTest(unittest.TestCase):
+    """The agent passes validated arguments to guest/desktop and stops what it started."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.log = Path(self.tmp.name) / "calls.jsonl"
+        fake = Path(self.tmp.name) / "desktop"
+        fake.write_text(f"""#!{sys.executable}
+import json, sys
+data = sys.stdin.buffer.read().decode()
+with open({str(self.log)!r}, "a") as out:
+    out.write(json.dumps({{"args": sys.argv[1:], "stdin": data}}) + "\\n")
+if sys.argv[1] == "start" and sys.argv[5] == "fail":
+    print(json.dumps({{"error": "simulated failure"}})); sys.exit(1)
+print(json.dumps({{"ok": sys.argv[1]}}))
+""")
+        fake.chmod(0o755)
+        self.agent = agent_module.Agent(FakeChannel(), desktop=fake)
+        self.user, self.sandbox, self.node = (str(uuid.uuid4()) for _ in range(3))
+
+    def calls(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def test_start_passes_validated_identifiers_and_title(self):
+        reply = self.agent.perform({"op": "desktop.start", "user": self.user, "sandbox": self.sandbox,
+                                    "node": self.node, "title": "OrangeSpace 沙盒 A"})
+        self.assertEqual(reply, {"ok": "start"})
+        self.assertEqual(self.calls()[0]["args"], ["start", self.user, self.sandbox, self.node, "OrangeSpace 沙盒 A"])
+
+    def test_malformed_identifiers_never_reach_the_desktop_command(self):
+        for bad in ({"sandbox": "../x"}, {"user": self.user.upper()}, {"node": 7}, {"title": 5}):
+            request = {"op": "desktop.start", "user": self.user, "sandbox": self.sandbox, "node": self.node,
+                       "title": "A", **bad}
+            with self.assertRaises((ValueError, TypeError, AttributeError)):
+                self.agent.perform(request)
+        self.assertEqual(self.calls(), [])
+
+    def test_desktop_errors_are_reported(self):
+        with self.assertRaisesRegex(RuntimeError, "simulated failure"):
+            self.agent.perform({"op": "desktop.start", "user": self.user, "sandbox": self.sandbox,
+                                "node": self.node, "title": "fail"})
+
+    def test_configure_sends_settings_on_stdin_only_and_bounds_size(self):
+        settings = '{"node_id":"%s","password":"fixture-secret"}' % self.node
+        self.agent.perform({"op": "desktop.configure", "user": self.user, "sandbox": self.sandbox,
+                            "node": self.node, "settings": settings})
+        call = self.calls()[0]
+        self.assertEqual(call["args"], ["configure", self.user, self.sandbox, self.node])
+        self.assertEqual(call["stdin"], settings)
+        self.assertNotIn("fixture-secret", " ".join(call["args"]))
+        with self.assertRaisesRegex(ValueError, "32768"):
+            self.agent.perform({"op": "desktop.configure", "user": self.user, "sandbox": self.sandbox,
+                                "node": self.node, "settings": "x" * 32769})
+
+    def test_desktops_still_running_are_stopped_when_the_client_goes_away(self):
+        other = str(uuid.uuid4())
+        for sandbox in (self.sandbox, other):
+            self.agent.perform({"op": "desktop.start", "user": self.user, "sandbox": sandbox,
+                                "node": self.node, "title": "A"})
+        self.agent.perform({"op": "desktop.stop", "user": self.user, "sandbox": other})
+        self.agent.stop_started()
+        stops = [c["args"] for c in self.calls() if c["args"][0] == "stop"]
+        self.assertEqual(stops, [["stop", self.user, other], ["stop", self.user, self.sandbox]])
 
 
 if __name__ == "__main__":

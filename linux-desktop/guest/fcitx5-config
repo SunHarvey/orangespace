@@ -1,0 +1,14 @@
+[Hotkey]
+EnumerateWithTriggerKeys=True
+
+[Hotkey/TriggerKeys]
+0=Control+space
+1=Super+space
+
+[Hotkey/AltTriggerKeys]
+0=Shift_L
+
+[Behavior]
+ActiveByDefault=True
+ShareInputState=All
+ShowInputMethodInformation=True

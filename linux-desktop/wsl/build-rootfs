@@ -39,10 +39,16 @@ echo "$SINGBOX_SHA256  $ARCHIVE" | sha256sum -c - >/dev/null
 tar -xzf "$ARCHIVE" -C "$WORK"
 SINGBOX="$WORK/sing-box-$SINGBOX_VERSION-linux-amd64/sing-box"
 
+# Desktop seccomp profile: Moby's default profile at a pinned digest, extended
+# by guest/build-seccomp for Chromium's own namespace sandbox.
+MOBY_SECCOMP_URL=https://raw.githubusercontent.com/moby/moby/v25.0.5/profiles/seccomp/default.json
+curl -fsSL --proto '=https' -o "$WORK/moby-default.json" "$MOBY_SECCOMP_URL"
+python3 "$SRC/guest/build-seccomp" "$WORK/moby-default.json" > "$WORK/desktop-seccomp.json"
+
 REVISION=${ORANGESPACE_REVISION:-$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)}
 
-PACKAGES=systemd,systemd-sysv,dbus,dbus-user-session,python3,podman,uidmap,nftables,iproute2,procps,\
-ca-certificates,locales,xserver-xephyr,x11-xserver-utils,xauth
+PACKAGES=systemd,systemd-sysv,dbus,dbus-user-session,python3,podman,catatonit,uidmap,nftables,iproute2,procps,\
+ca-certificates,locales,fonts-noto-cjk,xserver-xephyr,x11-xserver-utils,xauth
 
 mmdebstrap --variant=minbase --arch=amd64 --include="$PACKAGES" \
   --customize-hook='echo orangespace > "$1/etc/hostname"' \
@@ -50,6 +56,7 @@ mmdebstrap --variant=minbase --arch=amd64 --include="$PACKAGES" \
   --customize-hook='chroot "$1" useradd --create-home --uid 1000 --shell /bin/bash desk' \
   --customize-hook='sed -i "s/^# *zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/; s/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/" "$1/etc/locale.gen" && chroot "$1" locale-gen >/dev/null' \
   --customize-hook="install -m 0755 '$SINGBOX' \"\$1/usr/local/bin/sing-box\"" \
+  --customize-hook="install -d -m 0755 \"\$1/etc/orangespace\" && install -m 0644 '$WORK/desktop-seccomp.json' \"\$1/etc/orangespace/desktop-seccomp.json\"" \
   --customize-hook="mkdir -p \"\$1/opt/orangespace\" && cp -a '$SRC/bridge' '$SRC/guest' '$SRC/network' '$SRC/wsl' \"\$1/opt/orangespace/\"" \
   --customize-hook="find \"\$1/opt/orangespace\" -name '__pycache__' -prune -exec rm -rf {} + ; echo '$REVISION' > \"\$1/opt/orangespace/REVISION\"" \
   --customize-hook='chown -R root:root "$1/opt/orangespace" && chmod -R go-w "$1/opt/orangespace"' \

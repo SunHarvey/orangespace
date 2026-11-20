@@ -1,11 +1,33 @@
 #!/usr/bin/env python3
-"""Root-only local desktop lifecycle. Called by the authenticated guest controller."""
+"""Root-only desktop lifecycle inside the OrangeSpace WSL distribution.
+
+Called by the guest agent (wsl/agent.py). One sandbox =
+  - a Podman container `osdesk-<sandbox>` (desktop image), rootless inside a
+    fixed per-sandbox UID/GID block, no network until its gateway attaches,
+    read-only root, no capabilities, seccomp, resource limits;
+  - a private X display: an Xephyr window (a WSLg client) run as the systemd
+    unit `osdisp-<sandbox>`, whose /tmp/.X11-unix is this sandbox's display
+    directory. The container mounts only that directory, so it can reach its
+    own display but never WSLg's shared :0;
+  - a persistent HOME and node configuration under instances/<sandbox>.
+
+  desktop start     USER SANDBOX NODE TITLE
+  desktop stop      USER SANDBOX
+  desktop status    USER SANDBOX
+  desktop configure USER SANDBOX NODE   < node.json
+  desktop delete    USER SANDBOX        (removes the sandbox's local data)
+
+Prints one JSON object.
+"""
 import contextlib
 import fcntl
 import json
 import os
 from pathlib import Path
+import pwd
+import shutil
 import stat
+import struct
 import subprocess
 import sys
 import time
@@ -15,10 +37,16 @@ ROOT = Path("/var/lib/orangespace/desktop")
 DISPLAY_ROOT = Path("/run/orangespace/display")
 NETWORK = Path("/opt/orangespace/network")
 GUEST = Path("/opt/orangespace/guest")
-DOCKER = ("/usr/bin/docker", "--host", "unix:///var/run/docker.sock")
-IMAGE = "orangespace/desktop:dev"
+PODMAN = ("/usr/bin/podman",)
+IMAGE = "localhost/orangespace/desktop:dev"
+SECCOMP = Path("/etc/orangespace/desktop-seccomp.json")
+WSLG_X0 = "/mnt/wslg/.X11-unix/X0"
+DISPLAY_USER = "desk"            # runs Xephyr (a WSLg client); never the sandbox
 LABEL = "io.orangespace.desktop."
-UID = 1000
+GUEST_UID = 1000                 # the desktop user inside the container
+UID_BASE, UID_BLOCK, MAX_SLOTS = 200000, 65536, 64
+DISPLAY_BASE = 100               # X display number = DISPLAY_BASE + slot
+SCREEN = "1440x900"
 MAX_POLICY_BYTES = 32768
 
 
@@ -29,6 +57,13 @@ class DesktopError(Exception):
 def identifier(value):
     if str(uuid.UUID(value)) != value:
         raise ValueError("expected a canonical lower-case UUID")
+    return value
+
+
+def window_title(value):
+    # Shown as the Windows window title. Printable text only, bounded.
+    if not isinstance(value, str) or not 0 < len(value) <= 64 or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError("invalid window title")
     return value
 
 
@@ -44,27 +79,34 @@ def checked(*args, timeout=30):
     result = execute(*args, timeout=timeout)
     if result.returncode:
         # Report only the command and return code. Daemon stderr may contain private paths.
-        verb = args[len(DOCKER)] if args[:len(DOCKER)] == DOCKER else args[1]
+        verb = args[len(PODMAN)] if args[:len(PODMAN)] == PODMAN else args[1] if len(args) > 1 else ""
         raise DesktopError(f"{Path(args[0]).name} {verb} failed ({result.returncode})")
     return result.stdout.strip()
 
 
+def container_name(sandbox):
+    return "osdesk-" + sandbox
+
+
+def display_unit(sandbox):
+    return "osdisp-" + sandbox
+
+
 def inspect(sandbox, user):
-    name = "osdesk-" + sandbox
-    cid = checked(*DOCKER, "ps", "-aq", "--no-trunc", "--filter", f"name=^/{name}$")
+    name = container_name(sandbox)
+    cid = checked(*PODMAN, "ps", "-aq", "--no-trunc", "--filter", f"name=^{name}$")
     if not cid:
         return None
-    info, = json.loads(checked(*DOCKER, "inspect", "--type", "container", cid))
+    info, = json.loads(checked(*PODMAN, "inspect", "--type", "container", cid))
     labels = info["Config"]["Labels"] or {}
-    if (info["Name"] != "/" + name or labels.get(LABEL + "user") != user
+    if (info["Name"].lstrip("/") != name or labels.get(LABEL + "user") != user
             or labels.get(LABEL + "sandbox") != sandbox or not labels.get(LABEL + "node")):
         raise DesktopError("container name belongs to another desktop")
     return info
 
 
 def gateway(operation, sandbox, *args):
-    result = execute(str(NETWORK / operation), sandbox, *args)
-    return result.returncode == 0
+    return execute(str(NETWORK / operation), sandbox, *args).returncode == 0
 
 
 def disconnect(sandbox):
@@ -73,59 +115,140 @@ def disconnect(sandbox):
 
 
 @contextlib.contextmanager
+def locked(path):
+    with path.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def write_private(path, text, mode):
+    temp = path.with_name("." + path.name + ".new")
+    with temp.open("w") as out:
+        out.write(text)
+        out.flush()
+        os.fsync(out.fileno())
+    temp.chmod(mode)
+    os.replace(temp, path)
+
+
+@contextlib.contextmanager
 def ownership(user, sandbox, claim):
     for required in (ROOT, ROOT / "locks", ROOT / "instances"):
         required.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with (ROOT / "locks" / sandbox).open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with locked(ROOT / "locks" / sandbox):
         directory = ROOT / "instances" / sandbox
-        directory.mkdir(mode=0o700, exist_ok=True)
         owner = directory / "owner"
         if owner.exists() and owner.read_text().strip() != user:
             raise DesktopError("sandbox belongs to another account")
         if claim and not owner.exists():
-            temp = directory / ".owner-new"
-            with temp.open("w") as out:
-                out.write(user + "\n")
-                out.flush()
-                os.fsync(out.fileno())
-            os.replace(temp, owner)
-            fd = os.open(directory, os.O_RDONLY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+            directory.mkdir(mode=0o700, exist_ok=True)
+            write_private(owner, user + "\n", 0o600)
         yield directory
 
 
-def prepare_mounts(directory, sandbox):
-    display = DISPLAY_ROOT / sandbox
-    if (not stat.S_ISDIR(display.lstat().st_mode)
-            or not stat.S_ISSOCK((display / "X0").lstat().st_mode)
-            or not stat.S_ISREG((display / "Xauthority").lstat().st_mode)):
-        raise DesktopError("private X11 socket and authority are required")
+def slot_of(directory):
+    """This sandbox's fixed UID/GID block and display number, allocated once.
+
+    Distinct blocks mean that code escaping one container runs as a host UID
+    that owns nothing of any other sandbox.
+    """
+    path = directory / "slot"
+    if path.exists():
+        slot = int(path.read_text())
+        if not 0 <= slot < MAX_SLOTS:
+            raise DesktopError("corrupt sandbox slot")
+        return slot
+    with locked(ROOT / "locks" / ".slots"):
+        used = set()
+        for other in (ROOT / "instances").iterdir():
+            try:
+                used.add(int((other / "slot").read_text()))
+            except (OSError, ValueError):
+                pass
+        free = next((s for s in range(MAX_SLOTS) if s not in used), None)
+        if free is None:
+            raise DesktopError("too many sandboxes on this computer")
+        write_private(path, f"{free}\n", 0o600)
+        return free
+
+
+def host_uid(slot):
+    return UID_BASE + slot * UID_BLOCK + GUEST_UID
+
+
+def authority(cookie, number):
+    # One MIT-MAGIC-COOKIE-1 entry for this display, any host (FamilyWild).
+    fields = [b"", str(number).encode(), b"MIT-MAGIC-COOKIE-1", cookie]
+    return b"\xff\xff" + b"".join(struct.pack("!H", len(s)) + s for s in fields)
+
+
+def start_display(sandbox, slot, title):
+    """Starts this sandbox's Xephyr window and returns its display directory."""
+    number = DISPLAY_BASE + slot
+    directory = DISPLAY_ROOT / sandbox
+    stop_display(sandbox)
+    DISPLAY_ROOT.mkdir(mode=0o755, parents=True, exist_ok=True)
+    directory.mkdir(mode=0o755)
+    # Xephyr itself connects to WSLg through this link; inside the container
+    # the link dangles (no /mnt/wslg there).
+    (directory / "X0").symlink_to(WSLG_X0)
+    auth = directory / "Xauthority"
+    auth.write_bytes(authority(os.urandom(16), number))
+    auth.chmod(0o444)
+    desk = pwd.getpwnam(DISPLAY_USER)
+    os.chown(directory, desk.pw_uid, desk.pw_gid)   # Xephyr creates its socket here
+    checked("/usr/bin/systemd-run", "--quiet", "--collect", "--unit=" + display_unit(sandbox),
+            "--property=User=" + DISPLAY_USER, f"--property=BindPaths={directory}:/tmp/.X11-unix",
+            "--setenv=DISPLAY=:0", "--setenv=WAYLAND_DISPLAY=",
+            "/usr/bin/Xephyr", f":{number}", "-auth", "/tmp/.X11-unix/Xauthority", "-screen", SCREEN,
+            "-resizeable", "-nolisten", "tcp", "-noreset", "-extension", "MIT-SHM", "-title", title)
+    socket = directory / f"X{number}"
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if socket.exists() and stat.S_ISSOCK(socket.lstat().st_mode):
+            return directory, number
+        time.sleep(0.1)
+    stop_display(sandbox)
+    raise DesktopError("desktop window did not start (is WSLg available?)")
+
+
+def stop_display(sandbox):
+    execute("/usr/bin/systemctl", "stop", display_unit(sandbox) + ".service", timeout=15)
+    shutil.rmtree(DISPLAY_ROOT / sandbox, ignore_errors=True)
+
+
+def display_running(sandbox):
+    return execute("/usr/bin/systemctl", "is-active", "--quiet", display_unit(sandbox) + ".service").returncode == 0
+
+
+def prepare_home(directory, sandbox, slot):
     home = directory / "home"
     if not home.exists():
         home.mkdir(mode=0o700)
-        os.chown(home, UID, UID)
+    uid = host_uid(slot)
+    if home.stat().st_uid != uid:
+        os.chown(home, uid, uid)
     machine_id = directory / "machine-id"
     machine_id.write_text(uuid.UUID(sandbox).hex + "\n")
     machine_id.chmod(0o444)
-    return home, display, machine_id
+    return home, machine_id
 
 
-def create(user, sandbox, node, directory):
-    home, display, machine_id = prepare_mounts(directory, sandbox)
-    flags = ["--name", "osdesk-" + sandbox, "--hostname", "osdesk-" + sandbox,
-             "--pull=never", "--network=none",
-             "--ipc=private", "--init", "--read-only", "--user", "1000:1000",
+def create(user, sandbox, node, directory, slot, display, number):
+    home, machine_id = prepare_home(directory, sandbox, slot)
+    base = UID_BASE + slot * UID_BLOCK
+    flags = ["--name", container_name(sandbox), "--hostname", "osdesk",
+             "--pull=never", "--network=none", "--ipc=private", "--init", "--read-only",
+             "--user", f"{GUEST_UID}:{GUEST_UID}",
+             f"--uidmap=0:{base}:{UID_BLOCK}", f"--gidmap=0:{base}:{UID_BLOCK}",
              "--cap-drop=ALL", "--security-opt=no-new-privileges",
-             "--security-opt=apparmor=orangespace-desktop",
-             "--security-opt=seccomp=/etc/orangespace/desktop-seccomp.json",
+             f"--security-opt=seccomp={SECCOMP}",
              "--memory=2g", "--memory-swap=2g", "--pids-limit=512", "--cpu-shares=512",
              "--shm-size=256m", "--tmpfs", "/tmp:rw,nosuid,nodev,mode=1777,size=192m",
-             "--tmpfs", "/run/user/1000:rw,nosuid,nodev,noexec,mode=0700,uid=1000,gid=1000,size=16m",
-             "--log-driver=local", "--log-opt=max-size=5m", "--log-opt=max-file=2"]
+             # U: owned by the container user (Podman's form of uid=/gid=).
+             "--tmpfs", f"/run/user/{GUEST_UID}:rw,nosuid,nodev,noexec,mode=0700,size=16m,U",
+             "--log-driver=k8s-file", "--log-opt=max-size=5mb",
+             "--env", f"DISPLAY=:{number}", "--env", "XAUTHORITY=/tmp/.X11-unix/Xauthority"]
     for key, value in (("user", user), ("sandbox", sandbox), ("node", node)):
         flags.extend(["--label", LABEL + key + "=" + value])
     for source, target, writable in ((home, "/home/desktop", True),
@@ -134,20 +257,20 @@ def create(user, sandbox, node, directory):
                                       (GUEST / "resolv.conf", "/etc/resolv.conf", False)):
         mount = f"type=bind,src={source},dst={target}"
         flags.extend(["--mount", mount if writable else mount + ",readonly"])
-    checked(*DOCKER, "create", *flags, IMAGE)
+    checked(*PODMAN, "create", *flags, IMAGE)
 
 
 def remove(info):
     cid = info["Id"]
     if info["State"]["Running"]:
         # The browser handles SIGTERM by flushing its own profile. Wait before removing the namespace.
-        execute(*DOCKER, "exec", cid, "/bin/sh", "-c",
+        execute(*PODMAN, "exec", cid, "/bin/sh", "-c",
                 'pid=$(cat "$XDG_RUNTIME_DIR/browser.pid") || exit 0; '
                 'kill -TERM "$pid" 2>/dev/null || exit 0; '
                 'i=0; while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 30 ]; do sleep .1; i=$((i+1)); done',
                 timeout=8)
-        checked(*DOCKER, "stop", "--time=8", cid, timeout=20)
-    checked(*DOCKER, "rm", cid)
+        checked(*PODMAN, "stop", "--time=8", cid, timeout=20)
+    checked(*PODMAN, "rm", "--force", cid, timeout=20)
 
 
 def network_state(sandbox):
@@ -173,50 +296,64 @@ def configure(sandbox, node, stream):
 
 
 def stop(sandbox, info):
-    # Even on a failed gateway cleanup, tear down only this container and report the cleanup error.
+    # Network first, then the desktop, then its window; report the first failure.
     try:
         disconnect(sandbox)
     finally:
-        if info:
-            remove(info)
+        try:
+            if info:
+                remove(info)
+        finally:
+            stop_display(sandbox)
 
 
-def open_desktop(user, sandbox, node, directory, info):
-    if not info or not info["State"]["Running"]:
-        disconnect(sandbox)
-        if info:
-            remove(info)
-        create(user, sandbox, node, directory)
-        checked(*DOCKER, "start", "osdesk-" + sandbox)
-        info = inspect(sandbox, user)
+def open_desktop(user, sandbox, node, title, directory, info):
+    if info and info["State"]["Running"] and display_running(sandbox):
+        return info  # already open: the client just brings the window forward
+    slot = slot_of(directory)
+    disconnect(sandbox)
+    if info:
+        remove(info)
+    display, number = start_display(sandbox, slot, title)
+    create(user, sandbox, node, directory, slot, display, number)
+    checked(*PODMAN, "start", container_name(sandbox))
+    info = inspect(sandbox, user)
     if not info or not info["State"]["Running"]:
         raise DesktopError("desktop container failed to start")
     cid = info["Id"]
-    if not gateway("status", sandbox):
-        if not gateway("up", sandbox, str(info["State"]["Pid"]), node):
-            disconnect(sandbox)
-    checked(*DOCKER, "exec", cid, "touch", "/run/user/1000/launch")
-    # First run verifies a real browser window. Reopening a desktop still works after a user closes Chromium.
-    deadline = time.monotonic() + 45
+    # The gateway attaches to the container's network namespace before any
+    # application starts. Without a usable node the desktop stays offline.
+    if not gateway("up", sandbox, str(info["State"]["Pid"]), node):
+        disconnect(sandbox)
+    checked(*PODMAN, "exec", cid, "touch", f"/run/user/{GUEST_UID}/launch")
+    deadline = time.monotonic() + 60
     while (remaining := deadline - time.monotonic()) > 0:
         try:
-            probe = execute(*DOCKER, "exec", cid, "/usr/local/bin/desktop-ready", "--initial",
-                            timeout=min(4, remaining))
-            if not probe.returncode:
+            if not execute(*PODMAN, "exec", cid, "/usr/local/bin/desktop-ready", "--initial",
+                           timeout=min(4, remaining)).returncode:
                 return info
         except DesktopError:
-            # A slow X11 round trip on a cold guest may outlive this one probe.
             pass
         time.sleep(min(0.35, remaining))
     raise DesktopError("desktop window manager or Chromium did not become ready")
 
 
-def run(op, user, sandbox, node=None, policy_stream=None):
+def describe(user, sandbox, info):
+    running = bool(info and info["State"]["Running"])
+    return {"user_id": user, "sandbox_id": sandbox,
+            "node_id": info["Config"]["Labels"][LABEL + "node"] if info else None,
+            "desktop": "running" if running and display_running(sandbox) else "stopped",
+            "network": network_state(sandbox) if running else "offline"}
+
+
+def run(op, user, sandbox, node=None, title=None, policy_stream=None):
     user, sandbox = identifier(user), identifier(sandbox)
     if op in ("start", "configure"):
         node = identifier(node)
+    if op == "start":
+        title = window_title(title)
     with ownership(user, sandbox, claim=op in ("start", "configure")) as directory:
-        info = inspect(sandbox, user)
+        info = inspect(sandbox, user) if directory.exists() else None
         if op == "configure":
             if info and info["State"]["Running"]:
                 raise DesktopError("stop the desktop before configuring a node")
@@ -224,22 +361,24 @@ def run(op, user, sandbox, node=None, policy_stream=None):
             return {"user_id": user, "sandbox_id": sandbox, "node_id": node, "desktop": "stopped",
                     "network": "offline", "configured": True}
         if op == "start":
-            # A node mismatch is an ordinary admission rejection; preserve the current session.
             if info and info["State"]["Running"] and info["Config"]["Labels"][LABEL + "node"] != node:
                 raise DesktopError("stop the desktop before changing its bound node")
             try:
-                info = open_desktop(user, sandbox, node, directory, info)
+                info = open_desktop(user, sandbox, node, title, directory, info)
             except (DesktopError, OSError):
                 stop(sandbox, inspect(sandbox, user))
                 raise
         elif op == "stop":
             stop(sandbox, info)
             info = None
-        running = bool(info and info["State"]["Running"])
-        return {"user_id": user, "sandbox_id": sandbox,
-                "node_id": info["Config"]["Labels"][LABEL + "node"] if info else None,
-                "desktop": "running" if running else "stopped",
-                "network": network_state(sandbox) if running else "offline"}
+        elif op == "delete":
+            stop(sandbox, info)
+            # Local data only (HOME, browser profile, node credentials). Files on
+            # nodes are never deleted from here.
+            if directory.exists():
+                shutil.rmtree(directory)
+            return {"user_id": user, "sandbox_id": sandbox, "deleted": True}
+        return describe(user, sandbox, info)
 
 
 def main(args):
@@ -247,12 +386,18 @@ def main(args):
         if os.geteuid() != 0:
             raise DesktopError("root is required")
         os.umask(0o077)
-        if not ((len(args) == 4 and args[0] in ("start", "configure")) or
-                (len(args) == 3 and args[0] in ("status", "stop"))):
-            raise ValueError("usage: desktop start/configure USER SANDBOX NODE | desktop stop/status USER SANDBOX")
-        print(json.dumps(run(*args)))
+        if len(args) == 5 and args[0] == "start":
+            result = run("start", args[1], args[2], args[3], args[4])
+        elif len(args) == 4 and args[0] == "configure":
+            result = run("configure", args[1], args[2], args[3])
+        elif len(args) == 3 and args[0] in ("status", "stop", "delete"):
+            result = run(args[0], args[1], args[2])
+        else:
+            raise ValueError("usage: desktop start USER SANDBOX NODE TITLE | configure USER SANDBOX NODE |"
+                             " status/stop/delete USER SANDBOX")
+        print(json.dumps(result, ensure_ascii=False))
     except (DesktopError, ValueError, OSError) as exc:
-        print(json.dumps({"error": str(exc)}))
+        print(json.dumps({"error": str(exc)}, ensure_ascii=False))
         return 1
     return 0
 

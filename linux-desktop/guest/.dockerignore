@@ -3,3 +3,5 @@
 !desktop-session
 !startup
 !desktop-ready
+!fcitx5-profile
+!fcitx5-config
