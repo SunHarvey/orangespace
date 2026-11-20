@@ -197,11 +197,17 @@ def open_desktop(user, sandbox, node, directory, info):
             disconnect(sandbox)
     checked(*DOCKER, "exec", cid, "touch", "/run/user/1000/launch")
     # First run verifies a real browser window. Reopening a desktop still works after a user closes Chromium.
-    for _ in range(32):
-        probe = execute(*DOCKER, "exec", cid, "/usr/local/bin/desktop-ready", "--initial", timeout=4)
-        if not probe.returncode:
-            return info
-        time.sleep(0.35)
+    deadline = time.monotonic() + 45
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            probe = execute(*DOCKER, "exec", cid, "/usr/local/bin/desktop-ready", "--initial",
+                            timeout=min(4, remaining))
+            if not probe.returncode:
+                return info
+        except DesktopError:
+            # A slow X11 round trip on a cold guest may outlive this one probe.
+            pass
+        time.sleep(min(0.35, remaining))
     raise DesktopError("desktop window manager or Chromium did not become ready")
 
 

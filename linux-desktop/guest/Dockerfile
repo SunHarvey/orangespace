@@ -3,7 +3,7 @@ FROM debian:trixie-slim
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates chromium chromium-sandbox dbus-daemon dbus-x11 \
-        lxqt-session lxqt-panel lxqt-config lxqt-themes breeze-icon-theme pcmanfm-qt openbox xcompmgr \
+        lxqt-session lxqt-panel lxqt-config lxqt-themes breeze-icon-theme qt6-svg-plugins pcmanfm-qt openbox xcompmgr \
         xdg-user-dirs xdg-utils x11-utils fonts-dejavu fonts-noto-cjk \
         fcitx5 fcitx5-chinese-addons fcitx5-frontend-gtk3 fcitx5-frontend-qt6 \
     && rm -rf /var/lib/apt/lists/* \

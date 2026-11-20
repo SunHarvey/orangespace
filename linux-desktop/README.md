@@ -36,13 +36,29 @@ python3 -m unittest discover -s linux-desktop/guest -v
 python3 -m unittest discover -s linux-desktop/windows -v
 ```
 
-在具备 root、systemd 和真实 Docker 的专用 Debian 客体中，可运行下列集成测试。按照 [网络测试依赖](network/README.md) 安装网络工具、sing-box 和 openssl；图形测试需要 Xvfb、socat、x11-utils、x11-apps、xdotool 和 ImageMagick。安装源码到 /opt/orangespace，构建桌面镜像，用与上文相同的 seccomp/AppArmor 策略启动。每次测试会创建独立 UUID 的沙盒和临时测试节点。
+在具备 root、systemd 和真实 Docker 的专用 Debian 客体中，可运行下列集成测试。按照 [网络测试依赖](network/README.md) 安装网络工具、sing-box 和 openssl。图形测试需要 Xvfb、socat、x11-utils、x11-apps、xdotool 和 ImageMagick。发布盘只含列入清单的客体运行文件。运行这些测试时，将完整 linux-desktop 源码复制到测试客体的 /opt/orangespace，构建桌面镜像，用与上文相同的 seccomp/AppArmor 策略启动。每次测试会创建独立 UUID 的沙盒和临时测试节点。
 
 ```sh
 sudo python3 /opt/orangespace/network/smoke.py
 sudo python3 /opt/orangespace/bridge/smoke_desktops.py
+sudo python3 /opt/orangespace/bridge/smoke_desktops.py --nodes
 sudo python3 /opt/orangespace/guest/smoke_x11.py /tmp/orangespace-screenshots
 sudo python3 /opt/orangespace/guest/smoke_x11.py /tmp/orangespace-node-screenshots --nodes
 ```
 
-本轮实测使用 Debian 13 ARM64、4 个 vCPU 和 6 GiB 配置内存。网关测试的两套 TUIC 服务、DNS 应答和直连对照服务位于同一测试机的不同网络环境。图形桥测试让两个真实 LXQt/Chromium/PCManFM-Qt 桌面经两端桥接代码连向两个 Xvfb，实现了双向图形收发以及停止 A 后 B 可用。在这个测试中，宿主与客体两端以本地双向流代替 Windows QEMU 命名管道。Windows 11 x64 的 WHPX、XWin 窗口与输入体验、睡眠唤醒首包，以及两个真实公网节点的抓包仍须独立验收。x86_64 系统盘构建脚本尚待完整构建和启动验证。
+本轮双桌面实测使用 Debian 13 ARM64、4 个 vCPU 和 6 GiB 配置内存。网关测试的两套真实 TUIC 服务、DNS 应答和直连对照服务位于同一台测试机的不同网络环境。
+
+| 场景 | 实测结果 |
+|---|---|
+| 同址访问与节点故障 | 两个真实 Chromium 分别显示 A、B 的页面。停止 A 节点后，A 的探测离线，B 重新打开页面成功。独立网络测试中 B 的 512 KiB 长连接下载哈希吻合，直连对照服务零增量 |
+| 客户端导入与图形通道 | 两份凭据分别通过宿主桥导入。撤掉原始模板的授权后，两桌面仍通过自己的 HTTPS 探测。两个 LXQt/Chromium/PCManFM-Qt 桌面经桥连接独立 Xvfb，停止 A 后 B 窗口可操作。这项测试以本机双向流代替 Windows 命名管道 |
+| 个人数据 | A 与 B 的文件隔离；A 关闭并重开后，文件和 Chromium 中创建的书签仍在 |
+| 轻载内存 | 各开一个静态节点网页和一个文件管理器，最后一轮 A/B 的 cgroup.memory.current 约为 593/250 MiB，另一次为 245/244 MiB。此指标含可回收缓存，不含宿主图形进程、虚拟机和网关的共用开销。ARM64 桌面镜像约 1.33 GB |
+
+另外在 x86-64 QEMU 软件模拟下，用两个临时写入层实际启动了 Debian 系统盘和数据盘，验证了数据盘挂载、身份认证、经 virtio-serial 打开 Chromium 和文件管理器、ACPI 正常关机。可从 Linux 源码目录用以下命令重跑。依赖 qemu-system-x86_64、qemu-img、Xvfb、socat 和 xprop。原始双盘在测试中只读。
+
+```sh
+python3 linux-desktop/image/smoke-boot.py /path/debian.qcow2 /path/desktop-data.qcow2 --desktop
+```
+
+Windows 11 x64 的 WHPX、XWin 窗口与输入体验、睡眠唤醒首包，以及两个真实公网节点的抓包仍须独立验收。

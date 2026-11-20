@@ -9,7 +9,7 @@ import struct
 import subprocess
 import threading
 
-from wire import (Channel, Streams, SocketEndpoint, authenticate, background, encode,
+from wire import (Channel, Streams, SocketEndpoint, WorkspaceLocks, authenticate, background, encode,
                   identity, DATA, CLOSE, OPEN, REPLY, REQUEST, CREDIT)
 
 
@@ -79,7 +79,7 @@ class Agent:
         self.streams = Streams(channel)
         self.stream_numbers = itertools.count(1)
         self.displays = {}
-        self.locks = [threading.Lock() for _ in range(64)]
+        self.locks = WorkspaceLocks()
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
         self.ending = threading.Event()
 
@@ -102,7 +102,7 @@ class Agent:
         user, sid = identity(request["user"]), identity(request["sandbox"])
         if op not in ("start", "stop", "status", "configure"):
             raise ValueError("unknown desktop operation")
-        with self.locks[hash(sid) % len(self.locks)]:
+        with self.locks.for_id(sid):
             display = self.displays.get(sid)
             if display and display.user != user:
                 raise ValueError("workspace owner mismatch")

@@ -114,10 +114,12 @@ def qemu_args(cfg, pipe, key):
     key = str(key).replace(",", ",,")
     return [str(cfg.qemu), "-machine", "q35,accel=whpx", "-m", str(cfg.memory_mib),
             "-smp", str(cfg.cpus), "-display", "none", "-monitor", "none", "-serial", "none",
-            "-qmp", "stdio", "-drive", f"file={image},format=qcow2,if=virtio",
+            "-qmp", "stdio", "-boot", "strict=on",
+            "-drive", f"if=none,id=osroot,format=qcow2,file={image}",
+            "-device", "virtio-blk-pci,drive=osroot,bootindex=1",
             "-drive", f"if=none,id=osdata,format=qcow2,file={data_image}",
             "-device", "virtio-blk-pci,drive=osdata,serial=OrangeSpaceData",
-            "-netdev", "user,id=wan,ipv6=off", "-device", "virtio-net-pci,netdev=wan",
+            "-netdev", "user,id=wan,ipv6=off", "-device", "virtio-net-pci,netdev=wan,romfile=",
             "-device", "virtio-serial-pci", "-chardev", f"pipe,id=ctl,path={pipe}",
             "-device", "virtserialport,chardev=ctl,name=org.orangespace.control",
             "-fw_cfg", f"name=opt/orangespace/key,file={key}"]

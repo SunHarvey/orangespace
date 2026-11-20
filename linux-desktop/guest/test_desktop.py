@@ -105,6 +105,14 @@ class DesktopTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             desktop.run("stop", self.user, "../elsewhere")
 
+    def test_cold_desktop_may_become_ready_after_twelve_seconds(self):
+        self.patch("gateway", return_value=True)
+        self.patch("checked")
+        self.patch("execute", side_effect=[subprocess.CompletedProcess([], 1), subprocess.CompletedProcess([], 0)])
+        with patch.object(desktop.time, "monotonic", side_effect=[0, 1, 18]), patch.object(desktop.time, "sleep"):
+            result = desktop.open_desktop(self.user, self.sandbox, self.node, self.root, self.info)
+        self.assertEqual(result, self.info)
+
     def test_online_requires_positive_probe(self):
         self.patch("gateway", return_value=True)
         probe = self.patch("execute")

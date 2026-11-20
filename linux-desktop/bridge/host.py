@@ -14,7 +14,7 @@ import subprocess
 import sys
 import threading
 
-from wire import (Channel, Streams, authenticate, background, encode, identity, read_exact,
+from wire import (Channel, Streams, WorkspaceLocks, authenticate, background, encode, identity, read_exact,
                   write_all, BLOCK, MAX_PAYLOAD, CLOSE, OPEN, REQUEST, REPLY, DATA, CREDIT)
 
 
@@ -47,7 +47,7 @@ class Hub:
         self.pending = {}
         self.displays = {}
         self.numbers = itertools.count(1)
-        self.locks = [threading.Lock() for _ in range(64)]
+        self.locks = WorkspaceLocks()
 
     def request(self, message, timeout):
         number, reply = next(self.numbers), queue.Queue(1)
@@ -116,7 +116,7 @@ class Hub:
         timeout = int(spec.get("timeout", 90))
         if not 1 <= timeout <= 180:
             raise ValueError("invalid timeout")
-        with self.locks[hash(sid) % len(self.locks)]:
+        with self.locks.for_id(sid):
             with self.mutex:
                 existing = self.displays.get(sid)
             if existing and existing["user"] != user:

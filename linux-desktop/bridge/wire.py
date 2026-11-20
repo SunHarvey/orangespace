@@ -8,6 +8,7 @@ import socket
 import struct
 import threading
 import uuid
+import weakref
 
 REQUEST, REPLY, OPEN, DATA, CLOSE, CREDIT = range(1, 7)
 HEADER = struct.Struct("!BII")
@@ -71,6 +72,19 @@ def background(fn, *args):
     thread = threading.Thread(target=fn, args=args, daemon=True)
     thread.start()
     return thread
+
+
+class WorkspaceLocks:
+    def __init__(self):
+        self.guard = threading.Lock()
+        self.locks = weakref.WeakValueDictionary()
+
+    def for_id(self, sandbox):
+        with self.guard:
+            lock = self.locks.get(sandbox)
+            if lock is None:
+                lock = self.locks[sandbox] = threading.Lock()
+            return lock
 
 
 class Channel:

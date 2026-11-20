@@ -18,4 +18,7 @@ printf '[Match]\nName=en* eth*\n[Network]\nDHCP=ipv4\n' > /etc/systemd/network/1
 mount_line='/dev/disk/by-id/virtio-OrangeSpaceData /var/lib/orangespace/desktop ext4 defaults,nosuid,nodev,nofail,x-systemd.device-timeout=30s 0 2'
 grep -qxF "$mount_line" /etc/fstab || printf '%s\n' "$mount_line" >> /etc/fstab
 touch /etc/cloud/cloud-init.disabled
+# The controlled virtio channel is the only guest management endpoint.
+# Debian cloud images omit SSH host keys until cloud-init runs.
+systemctl mask ssh.service ssh.socket
 systemctl enable docker.service acpid.service apparmor.service systemd-networkd.service orangespace-agent.service
