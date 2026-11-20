@@ -1,5 +1,7 @@
 # 架构与必须保持的约束
 
+本文记录原生 Windows CEF 后端。当前分支新增的 Linux 容器后端见[本地 Linux 桌面架构](../linux-desktop/architecture.md)。
+
 ## 运行位置
 
 Windows 运行共享的 CEF 程序和每沙盒独立 BrowserHost 进程组；所有 Profile 数据在本机。

@@ -1,5 +1,7 @@
 # OrangeSpace 本地 Linux 桌面
 
+[技术架构、节点故障隔离与验证范围](architecture.md)
+
 Windows 客户端登录后可以创建沙盒、绑定节点、并排打开桌面和停止某一个沙盒。每个桌面运行非 root Chromium、LXQt 和 PCManFM-Qt，拥有自己的浏览器配置和下载目录。基础系统使用一台 QEMU/WHPX Debian 13 虚拟机。这个分支使用本地注册账号和管理员配置的 TUIC 节点。
 
 | 组件 | 入口 | 职责 |
