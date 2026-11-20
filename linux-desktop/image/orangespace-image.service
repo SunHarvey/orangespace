@@ -1,0 +1,9 @@
+[Unit]
+Description=Load bundled OrangeSpace desktop container image
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/orangespace/image/load-desktop
+RemainAfterExit=yes

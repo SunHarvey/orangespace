@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+# Composite Qt's ARGB windows onto the X11 root so both local rooted XWin and
+# root-frame capture display their contents on 24-bit screens.
+xcompmgr -n &
+startlxqt &
+session=$!
+chromium --no-first-run --no-default-browser-check --ozone-platform=x11 about:blank &
+browser=$!
+printf '%s\n' "$browser" > "$XDG_RUNTIME_DIR/browser.pid"
+# Opens a regular Files window. The LXQt desktop and menu can open more.
+pcmanfm-qt --new-window "$HOME" &
+wait "$session"

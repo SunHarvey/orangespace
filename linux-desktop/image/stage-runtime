@@ -1,0 +1,16 @@
+#!/bin/sh
+# Copy only the installed guest runtime into a new empty staging directory.
+set -eu
+[ "$#" -eq 1 ] || { echo 'usage: stage-runtime NEW-DIRECTORY' >&2; exit 2; }
+src=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
+out=$1
+[ ! -e "$out" ] || { echo "staging path already exists: $out" >&2; exit 1; }
+mkdir -m 0755 -- "$out"
+install -d -m 0755 "$out/bridge" "$out/guest" "$out/network" "$out/image"
+for name in guest.py wire.py cleanup.py; do install -m 0644 "$src/bridge/$name" "$out/bridge"; done
+install -m 0755 "$src/guest/desktop" "$out/guest"
+install -m 0644 "$src/guest/resolv.conf" "$src/guest/orangespace-desktop.apparmor" "$out/guest"
+install -m 0644 "$src/network/gateway.py" "$out/network"
+for name in up down status probe configure; do install -m 0755 "$src/network/$name" "$out/network"; done
+install -m 0755 "$src/image/load-desktop" "$src/image/configure-root" "$out/image"
+install -m 0644 "$src/image/orangespace-agent.service" "$src/image/orangespace-image.service" "$out/image"

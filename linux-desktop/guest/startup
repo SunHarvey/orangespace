@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+umask 077
+# Only the login manager starts applications. Docker starts this waiter on loopback alone.
+while [ ! -e "$XDG_RUNTIME_DIR/launch" ]; do sleep 0.1; done
+mkdir -p "$HOME/Downloads" "$HOME/.config/lxqt"
+if [ ! -e "$HOME/.config/lxqt/session.conf" ]; then
+    printf '[General]\nwindow_manager=openbox\n' > "$HOME/.config/lxqt/session.conf"
+fi
+if [ ! -e "$HOME/.config/lxqt/lxqt.conf" ]; then
+    printf '[General]\nicon_theme=breeze\nstyle=Fusion\ntheme=light\n' > "$HOME/.config/lxqt/lxqt.conf"
+fi
+exec dbus-run-session -- /usr/local/bin/desktop-session
