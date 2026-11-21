@@ -8,7 +8,7 @@
 
 OrangeSpace 发行版已装好全部依赖：systemd、Python 3、iproute2、nftables、procps、TUN 设备、固定版本的 sing-box（1.14.4），并开启 `net.ipv4.ip_forward=1`。根命名空间为专属点对点 veth 留出 `10.243.0.0/16` 和 `osw*` 接口名，不承载其他工作负载。桌面命名空间由 `guest/desktop` 创建，接网前只有 loopback。普通桌面用户不得进入根命名空间或获得 CAP_NET_ADMIN。
 
-网关运行时文件在 root 专用的 `/run/orangespace-network`，租约在 tmpfs 上的 `/run/orangespace/leases/<沙盒 UUID>.json`（root 所有、0600）。
+网关运行时文件在 root 专用的 `/run/orangespace-network`，租约在 tmpfs 上的 `/run/orangespace/leases/<沙盒 UUID>.json`（root 所有、0600），桌面停止或删除时随之删除。
 
 ## 租约与内核许可
 

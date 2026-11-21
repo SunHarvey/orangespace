@@ -401,10 +401,13 @@ def renew(sandbox, tunnel, remaining_ms):
 
 def stop(sandbox, info):
     # Network first, then the desktop, then its display and window; report the first failure.
+    # The lease goes with the network: a stopped desktop keeps no node credentials,
+    # and the next start needs a new lease from the client anyway.
     try:
         disconnect(sandbox)
     finally:
         try:
+            (LEASES / (sandbox + ".json")).unlink(missing_ok=True)
             if info:
                 remove(info)
         finally:

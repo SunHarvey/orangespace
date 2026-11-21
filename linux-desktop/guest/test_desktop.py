@@ -222,6 +222,23 @@ class DesktopTests(unittest.TestCase):
         remove.assert_called_once_with(self.info)
         stop_display.assert_called_once_with(self.sandbox)
 
+    def test_stop_drops_only_this_sandboxs_lease(self):
+        self.instance()
+        sibling = str(uuid.uuid4())
+        leases = self.root / "leases"
+        leases.mkdir()
+        for sandbox in (self.sandbox, sibling):
+            (leases / (sandbox + ".json")).write_text('{"password":"fixture"}')
+        self.patch("gateway", return_value=True)
+        self.patch("remove")
+        self.patch("stop_display")
+        self.patch("inspect", return_value=self.info)
+        self.patch("describe", return_value={"desktop": "stopped"})
+        desktop.run("stop", self.user, self.sandbox)
+        self.assertFalse((leases / (self.sandbox + ".json")).exists())
+        self.assertTrue((leases / (sibling + ".json")).exists())
+        desktop.run("stop", self.user, self.sandbox)  # already gone: stopping again still works
+
     def test_delete_removes_local_data_and_frees_the_slot(self):
         directory = self.instance()
         slot = desktop.slot_of(directory)
