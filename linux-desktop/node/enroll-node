@@ -1,0 +1,37 @@
+#!/bin/sh
+# Enrolls this node at the Centre with its Ed25519 identity key. Run as root
+# after install-api, with the Centre's one-time enrollment on stdin (the JSON
+# line printed by `orangespace-control-admin enroll-node`, piped straight here
+# so the token is never displayed or stored outside the service account):
+#
+#   ssh centre orangespace-control-admin enroll-node ... | ssh node enroll-node https://<centre>
+#
+# Writes the node's federation configuration (machine credential) under
+# /var/lib/orangespace/node/federation, owned by os-node only. The Centre
+# administrator then activates the node; until then the Centre refuses it.
+set -eu
+[ $# = 1 ] || { echo "usage: enroll-node <centre origin>  (enrollment JSON on stdin)" >&2; exit 2; }
+CENTRE=$1
+[ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 2; }
+STATE=/var/lib/orangespace/node
+. /etc/orangespace/node.env
+[ ! -e $STATE/federation ] || { echo "already enrolled ($STATE/federation exists)" >&2; exit 2; }
+PUBLIC=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["endpoint_ip"])' /etc/orangespace/tunnel.json)
+CONFIG=$STATE/enroll.json
+trap 'rm -f $CONFIG' EXIT
+# Only the service account ever holds the token; nothing is echoed.
+runuser -u os-node -- /opt/orangespace-api/venv/bin/python -I -c '
+import json, os, sys
+enrollment = json.loads(sys.stdin.readline(4096))
+config = dict(origin=sys.argv[1], node_id=sys.argv[2], node_api_origin="https://%s:8443" % sys.argv[3],
+              enrollment_id=enrollment["enrollment_id"], enrollment_token=enrollment["enrollment_token"],
+              private_key_file=sys.argv[4] + "/identity.pem", output_dir=sys.argv[4] + "/federation")
+if enrollment["node_id"] != sys.argv[2]:
+    raise SystemExit("enrollment is for another node")
+fd = os.open(sys.argv[4] + "/enroll.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w") as out:
+    json.dump(config, out)
+' "$CENTRE" "$ORANGESPACE_NODE_ID" "$PUBLIC" "$STATE"
+runuser -u os-node -- /opt/orangespace-api/venv/bin/python -I -m orangespace_node.enrollment_client --config $CONFIG
+systemctl restart orangespace-node-api
+echo "enrolled; activate it at the Centre (orangespace-control-admin activate-node --alias <name>)"

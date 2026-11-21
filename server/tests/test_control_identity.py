@@ -67,13 +67,14 @@ def test_real_node_inventory_to_center_approved_catalogue(control, client, confi
     assert created.status_code == 201
     user=created.json()['user']
     uid=user['central_user_id']
-    assert center.put('/control/v1/admin/users/'+uid+'/nodes/'+nid+'/grant',headers=admin,json=dict(schema=1,expected_grant_epoch=0,enabled=True,scopes=['tunnel'],valid_until=None,reason='local bridge fixture')).status_code == 200
     pending=center.post('/control/v1/admin/identity-mappings',headers=admin,json=dict(schema=1,node_id=nid,legacy_user_id=legacy,central_user_id=uid,evidence_digest=proof['evidence_digest'],reason='explicit local inventory'))
     assert pending.status_code == 201
     _,user_auth=login(center,user['username'],'test-password-long')
-    assert center.get('/control/v1/me/nodes',headers=user_auth).json()['items'] == []
     approved=center.post('/control/v1/admin/identity-mappings/'+pending.json()['mapping_id']+'/approve',headers=admin,json=dict(schema=1,expected_mapping_epoch=1,evidence_digest=proof['evidence_digest'],reason='approve actual local primary key'))
     assert approved.status_code == 200
+    assert center.get('/control/v1/me/nodes',headers=user_auth).json()['items'] == []
+    # A grant keeps an evidence-approved mapping instead of provisioning one.
+    assert center.put('/control/v1/admin/users/'+uid+'/nodes/'+nid+'/grant',headers=admin,json=dict(schema=1,expected_grant_epoch=0,enabled=True,scopes=['tunnel'],valid_until=None,reason='local bridge fixture')).status_code == 200
     rows=center.get('/control/v1/me/nodes',headers=user_auth).json()['items']
     assert len(rows)==1 and rows[0]['legacy_user_id']==legacy and rows[0]['node_id']==nid
     with engine.connect() as conn:

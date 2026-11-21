@@ -114,7 +114,8 @@ class Agent:
         self.ops = {"ping": self.ping, "facts": lambda request: facts(), "shutdown": self.shutdown,
                     "desktop.start": self.desktop_start, "desktop.stop": self.desktop_simple,
                     "desktop.status": self.desktop_simple, "desktop.delete": self.desktop_simple,
-                    "desktop.configure": self.desktop_configure}
+                    "desktop.configure": self.desktop_configure, "desktop.lease": self.desktop_lease,
+                    "desktop.renew": self.desktop_renew}
 
     def run_desktop(self, args, stdin=None, timeout=150):
         """guest/desktop prints one JSON object; its per-sandbox lock serializes
@@ -158,6 +159,21 @@ class Agent:
         if not isinstance(settings, str) or len(settings.encode("utf-8")) > MAX_NODE_CONFIG:
             raise ValueError("node configuration must be UTF-8 text of at most 32768 bytes")
         return self.run_desktop(["configure", user, sandbox, node], stdin=settings.encode("utf-8"), timeout=20)
+
+    def desktop_lease(self, request):
+        """A new node lease (tunnel credentials) for one sandbox; never logged."""
+        user, sandbox = canonical(request["user"], "user"), canonical(request["sandbox"], "sandbox")
+        node, lease = canonical(request["node"], "node"), request["lease"]
+        if not isinstance(lease, str) or len(lease.encode("utf-8")) > MAX_NODE_CONFIG:
+            raise ValueError("node lease must be UTF-8 text of at most 32768 bytes")
+        return self.run_desktop(["lease", user, sandbox, node], stdin=lease.encode("utf-8"), timeout=60)
+
+    def desktop_renew(self, request):
+        user, sandbox = canonical(request["user"], "user"), canonical(request["sandbox"], "sandbox")
+        tunnel, remaining = canonical(request["tunnel"], "tunnel"), request["remaining_ms"]
+        if type(remaining) is not int or not 0 < remaining <= 30000:
+            raise ValueError("invalid lease budget")
+        return self.run_desktop(["renew", user, sandbox, tunnel, str(remaining)], timeout=10)
 
     def stop_started(self):
         """The client went away: no desktop outlives its control channel."""

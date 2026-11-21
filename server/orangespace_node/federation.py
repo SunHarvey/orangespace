@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, StrictInt, StrictStr, field_validato
 from sqlalchemy import MetaData, Table, Column, String, JSON, ForeignKey, select
 from sqlalchemy.exc import IntegrityError
 from .auth import authenticate, digest_token
-from .database import AccessSession, User
+from .database import AccessSession, TunnelGrant, User
 from .control_identity import validate as validate_machine
 from .control_identity import tls_verify
 
@@ -169,6 +169,13 @@ class Federation:
         try:
             with self.db.session() as s:
                 u=s.get(User,f['legacy_user_id'],with_for_update=True)
+                if u is None and self.db.memory:
+                    # No local accounts: the Centre's mapping is the identity. The
+                    # placeholder hash can never verify; local login is off anyway.
+                    u=User(id=f['legacy_user_id'],username=f['legacy_user_id'],password_hash='!',enabled=True)
+                    s.add(u)
+                    s.add(TunnelGrant(user_id=u.id,enabled=True))
+                    s.flush()
                 if u is None or not u.enabled: raise HTTPException(401,'local identity unavailable')
                 d=digest_token(token)
                 s.add(AccessSession(token_digest=d,user_id=u.id,expires_at=f['expires_at']))

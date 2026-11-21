@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""Leak checks inside a running sandbox desktop (run as root in the OrangeSpace
+distribution while that sandbox's desktop is running with its gateway ready).
+
+    leak-check <sandbox-uuid> [<expected egress ipv4>]
+
+Runs, inside the desktop container `osdesk-<sandbox>` as its desktop user, what
+IP/DNS/WebRTC/QUIC leak test pages measure, and asks each remote service which
+address it saw:
+
+  https_ip      HTTPS to a public echo service
+  dns_system    the system resolver, as seen by Akamai's authoritative servers
+  dns_direct    a query sent straight to 8.8.8.8, as seen by Google
+  stun_google   WebRTC-style STUN binding (server-reflexive address)
+  stun_cloudflare
+  quic          the desktop's Chromium forced onto HTTP/3 (its own sandbox kept)
+  ipv6_blocked  no IPv6 connectivity
+
+Passes (exit 0) only if every service saw one and the same IPv4 address (the
+given one, if any), Chromium really used HTTP/3, and IPv6 is unreachable. Uses
+third-party services (ipify, Akamai, Google, Cloudflare); it measures what they
+see, not packet paths: capture on the Windows network adapter for that.
+"""
+import json
+import subprocess
+import sys
+import uuid
+
+PROBE = r'''
+import json, secrets, shutil, socket, struct, subprocess, tempfile, urllib.request
+out = {}
+def run(name, fn):
+    try:
+        out[name] = fn()
+    except Exception as e:
+        out[name] = "FAIL " + type(e).__name__
+def dns_txt(server, name):
+    qid = secrets.randbits(16)
+    q = struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0)
+    q += b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\0" + struct.pack(">HH", 16, 1)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.settimeout(6)
+        s.sendto(q, (server, 53))
+        r = s.recv(4096)
+    if struct.unpack(">H", r[0:2])[0] != qid:
+        raise ValueError("mismatched reply")
+    def skip(i):
+        while True:
+            if r[i] == 0:
+                return i + 1
+            if r[i] & 0xC0 == 0xC0:
+                return i + 2
+            i += r[i] + 1
+    i = skip(12) + 4
+    for _ in range(struct.unpack(">H", r[6:8])[0]):
+        i = skip(i)
+        typ, _, _, ln = struct.unpack(">HHIH", r[i:i + 10])
+        if typ == 16:
+            data = r[i + 10:i + 10 + ln]
+            return data[1:1 + data[0]].decode()
+        i += 10 + ln
+    raise ValueError("no TXT answer")
+def stun(host, port):
+    req = struct.pack(">HHI", 1, 0, 0x2112A442) + secrets.token_bytes(12)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.settimeout(6)
+        s.sendto(req, (host, port))
+        r = s.recv(2048)
+    i = 20
+    while i + 4 <= len(r):
+        t, ln = struct.unpack(">HH", r[i:i + 4])
+        if t == 0x0020:
+            ip = struct.unpack(">I", r[i + 8:i + 12])[0] ^ 0x2112A442
+            return socket.inet_ntoa(struct.pack(">I", ip))
+        i += 4 + ((ln + 3) & ~3)
+    raise ValueError("no mapped address")
+def quic():
+    profile = tempfile.mkdtemp(prefix="leak-check-")
+    try:
+        p = subprocess.run(["chromium", "--headless=new", "--disable-gpu", "--user-data-dir=" + profile,
+                            "--enable-quic", "--origin-to-force-quic-on=www.cloudflare.com:443",
+                            "--dump-dom", "https://www.cloudflare.com/cdn-cgi/trace"],
+                           capture_output=True, text=True, timeout=60)
+    finally:
+        shutil.rmtree(profile, ignore_errors=True)
+    lines = p.stdout.replace("<", "\n").replace(">", "\n").splitlines()
+    return dict(l.split("=", 1) for l in lines if l.split("=", 1)[0] in ("ip", "http"))
+def ipv6():
+    try:
+        socket.create_connection(("2606:4700:4700::1111", 443), timeout=5).close()
+    except OSError:
+        return True
+    return False
+run("https_ip", lambda: urllib.request.urlopen("https://api.ipify.org", timeout=10).read().decode())
+run("dns_system", lambda: socket.gethostbyname("whoami.akamai.net"))
+run("dns_direct", lambda: dns_txt("8.8.8.8", "o-o.myaddr.l.google.com"))
+run("stun_google", lambda: stun("stun.l.google.com", 19302))
+run("stun_cloudflare", lambda: stun("stun.cloudflare.com", 3478))
+run("quic", quic)
+run("ipv6_blocked", ipv6)
+print(json.dumps(out))
+'''
+
+
+def main():
+    if len(sys.argv) not in (2, 3):
+        print(__doc__.strip().splitlines()[2].strip(), file=sys.stderr)
+        return 2
+    sandbox = str(uuid.UUID(sys.argv[1]))
+    expected = sys.argv[2] if len(sys.argv) == 3 else None
+    probe = subprocess.run(["podman", "exec", "-i", "osdesk-" + sandbox, "python3", "-"], input=PROBE,
+                           capture_output=True, text=True, timeout=180)
+    if probe.returncode:
+        print(f"FAIL probe did not run: {probe.stderr.strip()[-200:]}")
+        return 1
+    seen = json.loads(probe.stdout.strip().splitlines()[-1])
+    quic = seen.get("quic") if isinstance(seen.get("quic"), dict) else {}
+    addresses = {name: seen.get(name) for name in ("https_ip", "dns_system", "dns_direct", "stun_google", "stun_cloudflare")}
+    addresses["quic"] = quic.get("ip")
+    reference = expected or addresses["https_ip"]
+    ok = True
+    for name, value in addresses.items():
+        good = value == reference
+        ok &= good
+        print(f"{'PASS' if good else 'FAIL'} {name:16s} {value}")
+    http3 = quic.get("http") == "http/3"
+    ok &= http3
+    print(f"{'PASS' if http3 else 'FAIL'} {'quic_http3':16s} {quic.get('http')}")
+    blocked = seen.get("ipv6_blocked") is True
+    ok &= blocked
+    print(f"{'PASS' if blocked else 'FAIL'} {'ipv6_blocked':16s} {seen.get('ipv6_blocked')}")
+    print(("all services saw " if ok else "mismatch; expected ") + str(reference))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

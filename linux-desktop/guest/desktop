@@ -382,6 +382,34 @@ def configure(sandbox, node, stream):
         raise DesktopError("node configuration rejected")
 
 
+LEASES = Path("/run/orangespace/leases")   # written by the gateway; tmpfs only
+
+
+def lease(sandbox, node, stream, info):
+    """Take a new node lease from the client; a running desktop reconnects with it."""
+    raw = stream.read(MAX_POLICY_BYTES + 1)
+    if not raw or len(raw) > MAX_POLICY_BYTES:
+        raise DesktopError("node lease must be between 1 and 32768 bytes")
+    try:
+        result = subprocess.run([str(NETWORK / "lease"), sandbox, node], input=raw,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    except subprocess.TimeoutExpired as exc:
+        raise DesktopError("node lease timed out") from exc
+    if result.returncode:
+        raise DesktopError("node lease rejected")
+    if info and info["State"]["Running"]:
+        if info["Config"]["Labels"][LABEL + "node"] != node:
+            raise DesktopError("lease is for another node than the running desktop")
+        # New tunnel credentials: rebuild the gateway; the desktop keeps running.
+        if not gateway("up", sandbox, str(info["State"]["Pid"]), node):
+            disconnect(sandbox)
+
+
+def renew(sandbox, tunnel, remaining_ms):
+    if not gateway("renew", sandbox, tunnel, str(remaining_ms)):
+        raise DesktopError("lease renewal rejected")
+
+
 def stop(sandbox, info):
     # Network first, then the desktop, then its display and window; report the first failure.
     try:
@@ -436,14 +464,25 @@ def describe(user, sandbox, info):
             "network": network_state(sandbox) if running else "offline"}
 
 
-def run(op, user, sandbox, node=None, title=None, policy_stream=None):
+def run(op, user, sandbox, node=None, title=None, policy_stream=None, remaining_ms=None):
     user, sandbox = identifier(user), identifier(sandbox)
-    if op in ("start", "configure"):
+    if op in ("start", "configure", "lease"):
         node = identifier(node)
+    if op == "renew":
+        node = identifier(node)  # the tunnel ID
+        if not remaining_ms.isdecimal() or not 0 < int(remaining_ms) <= 30000:
+            raise DesktopError("invalid lease budget")
     if op == "start":
         title = window_title(title)
-    with ownership(user, sandbox, claim=op in ("start", "configure")) as directory:
+    with ownership(user, sandbox, claim=op in ("start", "configure", "lease")) as directory:
+        if op == "renew":
+            # Every few seconds per sandbox: the gateway checks the tunnel, no container query.
+            renew(sandbox, node, int(remaining_ms))
+            return {"user_id": user, "sandbox_id": sandbox, "tunnel_id": node, "renewed": True}
         info = inspect(sandbox, user) if directory.exists() else None
+        if op == "lease":
+            lease(sandbox, node, policy_stream if policy_stream is not None else sys.stdin.buffer, info)
+            return describe(user, sandbox, info)
         if op == "configure":
             if info and info["State"]["Running"]:
                 raise DesktopError("stop the desktop before configuring a node")
@@ -467,6 +506,7 @@ def run(op, user, sandbox, node=None, title=None, policy_stream=None):
             # nodes are never deleted from here.
             if directory.exists():
                 shutil.rmtree(directory)
+            (LEASES / (sandbox + ".json")).unlink(missing_ok=True)
             return {"user_id": user, "sandbox_id": sandbox, "deleted": True}
         return describe(user, sandbox, info)
 
@@ -478,13 +518,15 @@ def main(args):
         os.umask(0o077)
         if len(args) == 5 and args[0] == "start":
             result = run("start", args[1], args[2], args[3], args[4])
-        elif len(args) == 4 and args[0] == "configure":
-            result = run("configure", args[1], args[2], args[3])
+        elif len(args) == 4 and args[0] in ("configure", "lease"):
+            result = run(args[0], args[1], args[2], args[3])
+        elif len(args) == 5 and args[0] == "renew":
+            result = run("renew", args[1], args[2], args[3], remaining_ms=args[4])
         elif len(args) == 3 and args[0] in ("status", "stop", "delete"):
             result = run(args[0], args[1], args[2])
         else:
-            raise ValueError("usage: desktop start USER SANDBOX NODE TITLE | configure USER SANDBOX NODE |"
-                             " status/stop/delete USER SANDBOX")
+            raise ValueError("usage: desktop start USER SANDBOX NODE TITLE | configure/lease USER SANDBOX NODE |"
+                             " renew USER SANDBOX TUNNEL REMAINING_MS | status/stop/delete USER SANDBOX")
         print(json.dumps(result, ensure_ascii=False))
     except (DesktopError, ValueError, OSError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False))

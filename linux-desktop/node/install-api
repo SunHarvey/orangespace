@@ -1,0 +1,222 @@
+#!/bin/sh
+# Installs the OrangeSpace node API (server/) as a federated node on a Rocky/RHEL 9
+# server that already has the TUIC node (./install) for its pinned sing-box.
+# The node has no database and no accounts: sessions and leases live in memory
+# only, and the Centre decides who may use it. Run as root:
+#
+#   install-api <node uuid> <public ipv4> <tls name> <server-source.tar.gz>
+#
+# The tarball holds the repository's server/ directory. Re-running upgrades code
+# and configuration and keeps the keys and the enrollment. Creates:
+#   - unbound on 127.0.0.1:5353, the node-local resolver the lease tunnels use
+#   - a per-node private CA (key never leaves this server) issuing the HTTPS API
+#     certificate and the lease TUIC certificate; clients pin ca.crt
+#   - the node's Ed25519 identity key (service account only), proven to the Centre
+#     at enrollment
+#   - service account os-node, API unit orangespace-node-api (loopback :8080)
+#   - nginx TLS front end on :8443 that refuses the loopback-only probe route
+# It prints the key fingerprint. Then, on the Centre host:
+#   orangespace-control-admin enroll-node --node-id <uuid> --alias <name> --display-name <text>
+#     --api-origin https://<ipv4>:8443 --tls-server-name <ipv4> --key-fingerprint <fp>
+# piped into ./enroll-node <centre origin> here, then
+#   orangespace-control-admin activate-node --alias <name>
+# The cloud security group must allow TCP 8443 and UDP 20000-20015.
+set -eu
+[ $# = 4 ] || { echo "usage: install-api <node uuid> <public ipv4> <tls name> <server.tar.gz>" >&2; exit 2; }
+NODE=$1 PUBLIC=$2 NAME=$3 SRC=$4
+[ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 2; }
+[ -x /opt/orangespace-node/bin/sing-box ] || { echo "install the TUIC node first (./install)" >&2; exit 2; }
+python3 -c "import uuid,sys; u=sys.argv[1]; assert str(uuid.UUID(u))==u" "$NODE"
+python3 -c "import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])" "$PUBLIC"
+LISTEN=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+API=/opt/orangespace-api
+CONF=/etc/orangespace
+TLS=$CONF/tls
+STATE=/var/lib/orangespace
+
+dnf -y -q install python3.12 python3.12-pip nginx unbound openssl >/dev/null
+getent passwd os-node >/dev/null ||
+  useradd --system --home-dir $STATE --no-create-home --shell /sbin/nologin os-node
+install -d -m 0755 $STATE "$CONF" "$TLS"
+install -d -m 0700 -o os-node -g os-node $STATE/files $STATE/node
+# The earlier database-backed layout is not used any more.
+rm -f $CONF/database.json
+
+# --- node-local resolver ----------------------------------------------------
+cat > /etc/unbound/conf.d/orangespace.conf <<'EOF'
+server:
+    interface: 127.0.0.1@5353
+    access-control: 127.0.0.0/8 allow
+    do-ip6: no
+EOF
+unbound-checkconf >/dev/null
+systemctl enable -q unbound
+systemctl restart unbound
+
+# --- private CA and certificates --------------------------------------------
+(
+  cd $TLS
+  umask 077
+  if [ ! -e ca.key ]; then
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+      -subj "/CN=OrangeSpace node CA $NAME" \
+      -addext "basicConstraints=critical,CA:TRUE,pathlen:0" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+      -keyout ca.key -out ca.crt 2>/dev/null
+  fi
+  printf 'subjectAltName=DNS:%s,IP:%s\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n' \
+    "$NAME" "$PUBLIC" > leaf.ext
+  for leaf in api lease; do
+    if [ ! -e $leaf.crt ] || ! openssl x509 -in $leaf.crt -noout -ext subjectAltName | grep -q "IP Address:$PUBLIC"; then
+      openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj "/CN=$NAME" \
+        -keyout $leaf.key -out $leaf.csr 2>/dev/null
+      openssl x509 -req -in $leaf.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 825 -sha256 \
+        -extfile leaf.ext -out $leaf.crt 2>/dev/null
+      rm -f $leaf.csr
+    fi
+  done
+  rm -f leaf.ext
+  chown root:root ca.key ca.crt api.key api.crt lease.crt
+  chown root:os-node lease.key
+  chmod 0600 ca.key api.key
+  chmod 0640 lease.key
+  chmod 0644 ca.crt api.crt lease.crt
+)
+
+# --- node identity key ------------------------------------------------------
+KEY=$STATE/node/identity.pem
+if [ ! -e $KEY ]; then
+  ( umask 077; openssl genpkey -algorithm ed25519 -out $KEY )
+  chown os-node:os-node $KEY
+fi
+
+# --- API code ----------------------------------------------------------------
+install -d -m 0755 $API
+rm -rf $API/src.new
+mkdir $API/src.new
+tar -xzf "$SRC" -C $API/src.new
+[ -f $API/src.new/server/pyproject.toml ] || { echo "tarball must contain server/" >&2; exit 2; }
+rm -rf $API/src.old
+[ ! -e $API/src ] || mv $API/src $API/src.old
+mv $API/src.new $API/src
+[ -x $API/venv/bin/python ] || python3.12 -m venv $API/venv
+$API/venv/bin/pip install -q --disable-pip-version-check --index-url https://pypi.org/simple \
+  -r $API/src/server/requirements.lock
+$API/venv/bin/pip install -q --disable-pip-version-check --index-url https://pypi.org/simple \
+  --no-deps --force-reinstall $API/src/server
+chown -R root:root $API
+chmod -R go-w $API
+rm -rf $API/src.old
+
+# --- lease runtime ------------------------------------------------------------
+[ -e $CONF/tunnel.lock ] || install -m 0644 /dev/null $CONF/tunnel.lock
+SB=/opt/orangespace-node/bin/sing-box
+cat > $CONF/tunnel.json <<EOF
+{"executable": "$SB", "executable_sha256": "$(sha256sum $SB | cut -d' ' -f1)",
+ "certificate": "$TLS/lease.crt", "private_key": "$TLS/lease.key",
+ "endpoint_ip": "$PUBLIC", "listen_ip": "$LISTEN", "tls_server_name": "$NAME",
+ "port_start": 20000, "port_end": 20015, "max_leases": 16, "lease_seconds": 30,
+ "startup_timeout": 3, "probe_port": 8080, "dns_port": 5353, "lock_file": "$CONF/tunnel.lock"}
+EOF
+chmod 0644 $CONF/tunnel.json
+FEDERATION=$STATE/node/federation/federation.json
+cat > $CONF/node.env <<EOF
+ORANGESPACE_NODE_ID=$NODE
+ORANGESPACE_NODE_STATE=memory
+ORANGESPACE_DATA_ROOT=$STATE/files
+ORANGESPACE_FEDERATION_CONFIG=$FEDERATION
+ORANGESPACE_TUNNEL_CONFIG=$CONF/tunnel.json
+EOF
+chmod 0644 $CONF/node.env
+
+cat > /etc/systemd/system/orangespace-node-api.service <<EOF
+[Unit]
+Description=OrangeSpace node API (federated, memory-only state)
+After=network-online.target unbound.service
+Wants=network-online.target
+# Enrolled at the Centre first (./enroll-node).
+ConditionPathExists=$FEDERATION
+
+[Service]
+User=os-node
+Group=os-node
+EnvironmentFile=$CONF/node.env
+ExecStart=$API/venv/bin/uvicorn orangespace_node.app:create_app --factory --host 127.0.0.1 --port 8080 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-server-header --no-access-log
+# Every lease's sing-box lives in this cgroup and dies with the API.
+KillMode=control-group
+SendSIGKILL=yes
+LimitCORE=0
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=$STATE/files
+MemoryMax=256M
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /usr/local/sbin/orangespace-node-admin <<EOF
+#!/bin/sh
+# Node maintenance (cleanup-uploads). Accounts and grants live in the Centre.
+set -a; . $CONF/node.env; set +a
+exec runuser -u os-node -- $API/venv/bin/orangespace-node "\$@"
+EOF
+chmod 0755 /usr/local/sbin/orangespace-node-admin
+
+# --- HTTPS front end ------------------------------------------------------------
+cat > /etc/nginx/nginx.conf <<EOF
+user nginx;
+worker_processes 1;
+error_log /var/log/nginx/error.log warn;
+pid /run/nginx.pid;
+events { worker_connections 256; }
+http {
+    server_tokens off;
+    access_log off;
+    limit_req_zone \$binary_remote_addr zone=api:1m rate=20r/s;
+    server {
+        listen 8443 ssl;
+        ssl_certificate $TLS/api.crt;
+        ssl_certificate_key $TLS/api.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        client_max_body_size 1025m;
+        client_body_timeout 60s;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        # Loopback-only route: never reachable through the public front end.
+        location ~* ^/v1/tunnels/[^/]+/probe/*\$ { return 404; }
+        location / {
+            limit_req zone=api burst=40 nodelay;
+            proxy_pass http://127.0.0.1:8080;
+            proxy_http_version 1.1;
+            proxy_set_header Host \$host;
+            proxy_set_header Connection "";
+            proxy_set_header X-Forwarded-For \$remote_addr;
+        }
+    }
+}
+EOF
+nginx -t -q
+systemctl daemon-reload
+systemctl enable -q orangespace-node-api nginx
+systemctl restart nginx
+FP=$($API/venv/bin/python -I -c '
+import hashlib, sys
+from cryptography.hazmat.primitives import serialization
+key = serialization.load_pem_private_key(open(sys.argv[1], "rb").read(), None)
+raw = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+print(hashlib.sha256(raw).hexdigest())' $KEY)
+if [ -e $FEDERATION ]; then
+  systemctl restart orangespace-node-api
+  sleep 2
+  systemctl is-active --quiet orangespace-node-api || { echo "API failed to start" >&2; exit 1; }
+  curl -fsS --cacert $TLS/ca.crt --connect-to "::127.0.0.1:8443" "https://$PUBLIC:8443/healthz" >/dev/null ||
+    { echo "HTTPS front end check failed" >&2; exit 1; }
+  echo "node API ready: https://$PUBLIC:8443 (node $NODE); pin $TLS/ca.crt"
+else
+  echo "installed; not enrolled yet. node $NODE key fingerprint $FP"
+fi

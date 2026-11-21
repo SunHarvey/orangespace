@@ -1,0 +1,192 @@
+#!/bin/sh
+# Installs the OrangeSpace Centre (orangespace_control + Vue console) on a Rocky/RHEL 9
+# management server, behind Caddy with a publicly trusted certificate for its IP.
+# Run as root:
+#
+#   install-control <public ipv4> <server-source.tar.gz> <console-dist.tar.gz> [--reset-database]
+#
+# - server-source.tar.gz holds the repository's server/ directory;
+#   console-dist.tar.gz holds the built apps/control-console/dist (`npm run build`).
+# - The database URL comes from /root/orangespace-rds/control.json (root-only,
+#   {"database_url": ..., "session_ttl_seconds": ...}); it is copied to the service
+#   account's private config and never printed.
+# - --reset-database drops every control_* table in that database before migrating.
+#   It destroys all Centre data (accounts, nodes, grants, sessions, permits).
+# - Re-running upgrades code and units and keeps the database.
+# Afterwards create the administrator interactively:
+#   orangespace-control-admin bootstrap-admin --username <name>
+# The cloud security group must allow TCP 80 and 443 (certificate issuance and HTTPS).
+set -eu
+[ $# -ge 3 ] && [ $# -le 4 ] || { echo "usage: install-control <ipv4> <server.tar.gz> <dist.tar.gz> [--reset-database]" >&2; exit 2; }
+PUBLIC=$1 SRC=$2 DIST=$3 RESET=${4:-}
+[ -z "$RESET" ] || [ "$RESET" = --reset-database ] || { echo "unknown option $RESET" >&2; exit 2; }
+[ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 2; }
+python3 -c "import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])" "$PUBLIC"
+SECRET=/root/orangespace-rds/control.json
+[ -f $SECRET ] || { echo "missing $SECRET" >&2; exit 2; }
+
+APP=/opt/orangespace-control
+STATE=/var/lib/orangespace-control
+CONFIG=$STATE/control.json
+ETC=/etc/orangespace-control
+CADDY_VERSION=2.11.7
+# SHA-256 of caddy_2.11.7_linux_amd64.tar.gz; its SHA-512 matched the release's
+# caddy_2.11.7_checksums.txt on 2026-11-21.
+CADDY_SHA256=727b91701a392de6ebc5027509f548bf39979e5216340d0faed8fa5e69c84f8b
+
+dnf -y -q install python3.12 tar >/dev/null
+for account in os-control os-caddy; do
+  getent passwd $account >/dev/null ||
+    useradd --system --home-dir /var/lib/$account --no-create-home --shell /sbin/nologin $account
+done
+install -d -m 0700 -o os-control -g os-control $STATE
+install -d -m 0700 -o os-caddy -g os-caddy /var/lib/orangespace-caddy
+install -d -m 0755 $ETC $APP
+install -m 0600 -o os-control -g os-control $SECRET $CONFIG
+
+# --- code and console -----------------------------------------------------------
+rm -rf $APP/src.new $APP/dist.new
+mkdir $APP/src.new $APP/dist.new
+tar -xzf "$SRC" -C $APP/src.new
+tar -xzf "$DIST" -C $APP/dist.new
+[ -f $APP/src.new/server/pyproject.toml ] || { echo "server tarball must contain server/" >&2; exit 2; }
+[ -f $APP/dist.new/index.html ] || { echo "console tarball must contain index.html at its root" >&2; exit 2; }
+rm -rf $APP/src $APP/dist
+mv $APP/src.new $APP/src
+mv $APP/dist.new $APP/dist
+[ -x $APP/venv/bin/python ] || python3.12 -m venv $APP/venv
+$APP/venv/bin/pip install -q --disable-pip-version-check --index-url https://pypi.org/simple \
+  -r $APP/src/server/requirements.lock
+$APP/venv/bin/pip install -q --disable-pip-version-check --index-url https://pypi.org/simple \
+  --no-deps --force-reinstall $APP/src/server
+chown -R root:root $APP
+chmod -R go-w $APP
+
+cat > /usr/local/sbin/orangespace-control-admin <<EOF
+#!/bin/sh
+# Centre administration (bootstrap-admin asks for the password on the terminal).
+exec runuser -u os-control -- $APP/venv/bin/python -I -m orangespace_control.cli --config $CONFIG "\$@"
+EOF
+chmod 0755 /usr/local/sbin/orangespace-control-admin
+
+# --- database --------------------------------------------------------------------
+systemctl stop orangespace-control.service 2>/dev/null || true
+if [ "$RESET" = --reset-database ]; then
+  runuser -u os-control -- $APP/venv/bin/python -I - "$CONFIG" <<'PY'
+import sys
+from sqlalchemy import text
+from orangespace_control.config import load_config
+from orangespace_common.database import create_mysql_engine
+engine = create_mysql_engine(load_config(sys.argv[1]).database_url)
+with engine.begin() as conn:
+    names = [r[0] for r in conn.execute(text(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() "
+        "AND table_name LIKE :pattern"), {"pattern": "control\\_%"})]
+    conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+    for name in names:
+        conn.execute(text(f"DROP TABLE `{name}`"))
+    conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+print(f"dropped {len(names)} control tables")
+PY
+fi
+( cd $APP/src/server &&
+  runuser -u os-control -- $APP/venv/bin/alembic -c alembic-control.ini -x config=$CONFIG upgrade head )
+
+# --- HTTPS front end ---------------------------------------------------------------
+if [ ! -x $APP/caddy/caddy ] || ! $APP/caddy/caddy version | grep -q "^v$CADDY_VERSION "; then
+  T=$(mktemp -d)
+  curl -fsSL -o "$T/caddy.tgz" \
+    "https://github.com/caddyserver/caddy/releases/download/v$CADDY_VERSION/caddy_${CADDY_VERSION}_linux_amd64.tar.gz"
+  echo "$CADDY_SHA256  $T/caddy.tgz" | sha256sum -c - >/dev/null
+  tar -xzf "$T/caddy.tgz" -C "$T" caddy
+  install -d -m 0755 $APP/caddy
+  install -m 0755 "$T/caddy" $APP/caddy/caddy
+  rm -rf "$T"
+fi
+cat > $ETC/Caddyfile <<EOF
+{
+    admin off
+    skip_install_trust
+    default_sni $PUBLIC
+    servers {
+        protocols h1 h2
+    }
+}
+
+https://$PUBLIC {
+    tls {
+        issuer acme {
+            dir https://acme-v02.api.letsencrypt.org/directory
+            profile shortlived
+        }
+    }
+    request_body {
+        max_size 64KB
+    }
+    reverse_proxy 127.0.0.1:8090
+}
+EOF
+chmod 0644 $ETC/Caddyfile
+
+cat > /etc/systemd/system/orangespace-control.service <<EOF
+[Unit]
+Description=OrangeSpace Centre
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=os-control
+Group=os-control
+ExecStart=$APP/venv/bin/python -I -m orangespace_control.cli --config $CONFIG serve --host 127.0.0.1 --port 8090 --dist $APP/dist
+Environment=PYTHONDONTWRITEBYTECODE=1
+KillMode=control-group
+LimitCORE=0
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+MemoryMax=320M
+TasksMax=96
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+cat > /etc/systemd/system/orangespace-control-https.service <<EOF
+[Unit]
+Description=OrangeSpace Centre HTTPS front end
+After=network-online.target orangespace-control.service
+Wants=network-online.target
+
+[Service]
+User=os-caddy
+Group=os-caddy
+ExecStart=$APP/caddy/caddy run --config $ETC/Caddyfile --adapter caddyfile
+Environment=XDG_DATA_HOME=/var/lib/orangespace-caddy
+Environment=XDG_CONFIG_HOME=/var/lib/orangespace-caddy/config
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/orangespace-caddy
+UMask=0077
+MemoryMax=160M
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable -q orangespace-control.service orangespace-control-https.service
+systemctl restart orangespace-control.service orangespace-control-https.service
+# Checked locally (a cloud server often cannot reach its own public address),
+# with the certificate verified for the public IP.
+check() { curl -fsS --max-time 5 --connect-to "::127.0.0.1:443" "https://$PUBLIC/healthz" >/dev/null 2>&1; }
+for _ in $(seq 60); do check && break; sleep 2; done
+check || { echo "Centre is not reachable over HTTPS" >&2; exit 1; }
+echo "Centre ready: https://$PUBLIC/control/v1 (console https://$PUBLIC/)"

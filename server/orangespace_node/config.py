@@ -29,6 +29,9 @@ class Settings:
             personal_root = self.data_root.resolve()
             if state_root.is_relative_to(personal_root) or personal_root.is_relative_to(state_root):
                 raise ValueError("Node state and personal roots must be separate")
+        from .database import MEMORY
+        if self.database_url == MEMORY and (self.federation_config is None or self.deployment_mode is not None):
+            raise ValueError("memory node state requires federation")
         if self.max_upload_bytes <= 0 or self.token_lifetime_seconds <= 0:
             raise ValueError("upload size and token lifetime must be positive")
         if self.login_attempts <= 0 or self.login_window_seconds <= 0:
@@ -46,12 +49,18 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         # A stable explicit identity prevents accidentally treating two nodes as one.
+        state = os.environ.get("ORANGESPACE_NODE_STATE", "database")
+        if state not in ("database", "memory"):
+            raise ValueError("ORANGESPACE_NODE_STATE must be database or memory")
+        if state == "memory" and "ORANGESPACE_DATABASE_CONFIG" in os.environ:
+            raise ValueError("memory node state takes no database configuration")
+        from .database import MEMORY
         return cls(
             federation_config=Path(os.environ["ORANGESPACE_FEDERATION_CONFIG"]) if "ORANGESPACE_FEDERATION_CONFIG" in os.environ else None,
             tunnel_config=Path(os.environ["ORANGESPACE_TUNNEL_CONFIG"]) if os.environ.get("ORANGESPACE_TUNNEL_CONFIG") else None,
             node_id=UUID(os.environ["ORANGESPACE_NODE_ID"]),
             data_root=Path(os.environ.get("ORANGESPACE_DATA_ROOT", "/var/lib/orangespace/files")),
-            database_url=cls._database_url_from_file(),
+            database_url=MEMORY if state == "memory" else cls._database_url_from_file(),
             token_lifetime_seconds=int(os.environ.get("ORANGESPACE_TOKEN_TTL", "28800")),
             max_upload_bytes=int(os.environ.get("ORANGESPACE_MAX_UPLOAD_BYTES", "1073741824")),
             login_attempts=int(os.environ.get("ORANGESPACE_LOGIN_ATTEMPTS", "10")),

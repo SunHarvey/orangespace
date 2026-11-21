@@ -37,6 +37,11 @@ def _publish_identity_evidence(args: argparse.Namespace) -> None:
         raise SystemExit(1) from None
 
 
+def db_memory(settings) -> bool:
+    from .database import MEMORY
+    return settings.database_url == MEMORY
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="OrangeSpace node administration; passwords are read privately")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -56,6 +61,9 @@ def main() -> None:
         _publish_identity_evidence(args)
         return
     settings = Settings.from_env()
+    if db_memory(settings) and args.command != "cleanup-uploads":
+        # A memory-state node has no accounts; manage them at the Centre.
+        parser.error(f"{args.command} needs a node database; accounts and grants live in the Centre")
     db = Database(settings.database_url)
     try:
         db.initialize()

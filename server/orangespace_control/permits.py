@@ -1,9 +1,15 @@
-"""Short forwarding permits, serialized with every authority mutation."""
+"""Short forwarding permits, serialized with every authority mutation.
+
+The centre also owns tunnel anti-replay: nodes keep leases only in memory, so a
+restarted node cannot remember which tunnel IDs or generations it has seen.
+"""
 import time
 from fastapi import Request
+from sqlalchemy import select
 from .schema_v1 import users, sessions, nodes, mappings, grants
 from .exchange_schema import exchanges, federations
 from .permit_schema import permits
+from .binding_schema import bindings
 from .security import ControlError, authority_lock, now, uid, show
 from .enrollment import decode, digest
 
@@ -50,6 +56,25 @@ def install_routes(app,engine,body,identity,row,live):
                 if any(original[k]!=v for k,v in binding.items()) or original['epochs']!=epochs:
                     raise ControlError(409,'conflict')
                 if original['state']!='issued': raise ControlError(410,'terminated')
+            key=((bindings.c.node_id==node['id'])&(bindings.c.central_user_id==ticket['central_user_id'])
+                 &(bindings.c.sandbox_id==ids['sandbox_id']))
+            if not original and data['operation']=='create':
+                # A tunnel ID is single-use everywhere; a sandbox's generation only rises.
+                if conn.execute(select(permits.c.id).where(permits.c.tunnel_id==ids['tunnel_id']).limit(1)).first():
+                    raise ControlError(409,'conflict')
+                latest=row(conn,bindings,key)
+                if latest and data['generation']<=latest['generation']: raise ControlError(409,'conflict')
+                values=dict(generation=data['generation'],tunnel_id=ids['tunnel_id'],
+                            federation_session_id=ids['federation_session_id'],updated_at=now())
+                if latest: conn.execute(bindings.update().where(key).values(**values))
+                else: conn.execute(bindings.insert().values(node_id=node['id'],central_user_id=ticket['central_user_id'],sandbox_id=ids['sandbox_id'],**values))
+            # Renewals (and retried creates) must still be the sandbox's current
+            # tunnel, created on this node under this federation session.
+            current=row(conn,bindings,key)
+            if (not current or current['generation']!=data['generation'] or current['tunnel_id']!=ids['tunnel_id']
+                or current['federation_session_id']!=ids['federation_session_id']):
+                raise ControlError(410,'terminated')
+            if original:
                 pid,expiry,cap=original['id'],original['expires_at'],original['remaining_ttl_ms']
             else:
                 pid=uid()

@@ -25,6 +25,14 @@ python3 -m venv .venv
 
 仅把 API 绑定到回环地址，由 Caddy 提供外部 HTTPS。API 不启用跨域访问，不使用浏览器 Cookie 认证。反向代理要限制连接、请求体大小、上传超时和登录频率。当前程序内登录限流属于单进程，并最多同时进行 4 个密码验证；部署示例使用一个 worker，多个实例必须额外使用共享限流设施。
 
+### 联邦内存模式（部署默认）
+
+`ORANGESPACE_NODE_STATE=memory` 时节点不连数据库：会话、隧道授权和租约放在进程内存（SQLite 内存库，单锁串行），重启即清空。它必须同时配置 `ORANGESPACE_FEDERATION_CONFIG`，不能再设 `ORANGESPACE_DATABASE_CONFIG`。账户与授权以中心为准：首次换票时节点按中心票据建立本地身份（id 即中心用户 id，本地密码登录关闭）和隧道授权。节点 CLI 在此模式下只保留 `cleanup-uploads`。个人文件仍在 `ORANGESPACE_DATA_ROOT`，重启不丢。节点重启后旧隧道无法复活：中心按（节点、用户、沙盒）只认最新代次，并拒绝用过的 tunnel_id。安装与登记见 `linux-desktop/node/README.md`。
+
+中心运维命令（在中心主机上以服务账户运行，与控制台同锁、同审计）：`orangespace-control-admin create-user | enroll-node | activate-node | grant | list-nodes`。`create-user` 的密码在终端读取或从标准输入读一行；`enroll-node` 把一次性登记令牌打印到标准输出，供直接管道给节点的 `enroll-node`。
+
+### 数据库模式
+
 `ORANGESPACE_DATABASE_CONFIG` 只指定受保护 JSON 文件路径；该文件仅包含 `database_url`，权限0600并属于运行账号/受信管理员，不将 DSN 或密码放入环境变量。连接必须使用本机绝对 Unix socket，或指定可信 CA 并正常校验名称的 TLS。运行时拒绝 SQLite/PostgreSQL URL；启动只校验迁移版本，不自动建表。保留旧库、原 UUID 和个人目录；开发不以前置备份/恢复演练或生产切换为门槛，不得用初始化替代迁移。
 
 ## API

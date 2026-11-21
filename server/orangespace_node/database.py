@@ -1,4 +1,5 @@
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+import threading
 import time
 from collections.abc import Iterator
 from uuid import uuid4
@@ -53,19 +54,44 @@ class TunnelTombstone(Base):
     generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
+MEMORY = "memory:"
+
+
 class Database:
+    """Node state store.
+
+    ``MEMORY`` keeps sessions, federation bindings and tunnel bookkeeping in
+    process memory only: nothing is installed or written to disk and a restart
+    forgets everything (clients exchange again; the Centre remembers tunnel
+    generations and IDs). Any other URL is the legacy migrated database.
+    """
     def __init__(self, url: str):
-        self.engine = create_node_engine(url)
+        self.memory = url == MEMORY
+        if self.memory:
+            from sqlalchemy import create_engine
+            from sqlalchemy.pool import StaticPool
+            # One private connection, serialized by a process lock.
+            self.engine = create_engine("sqlite://", poolclass=StaticPool,
+                                        connect_args={"check_same_thread": False})
+        else:
+            self.engine = create_node_engine(url)
+        self.lock = threading.RLock() if self.memory else None
         self.factory = sessionmaker(self.engine, expire_on_commit=False)
 
     def initialize(self) -> None:
+        if self.memory:
+            from .federation import metadata as federation_metadata
+            Base.metadata.create_all(self.engine)
+            federation_metadata.create_all(self.engine)
+            return
         from orangespace_common.node_migrations import verify_schema
         verify_schema(self.engine)
 
     @contextmanager
     def session(self) -> Iterator[Session]:
-        with self.factory.begin() as session:
-            yield session
+        with self.lock if self.lock is not None else nullcontext():
+            with self.factory.begin() as session:
+                yield session
 
     def close(self) -> None:
         self.engine.dispose()

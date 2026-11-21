@@ -48,6 +48,10 @@ def test_permit_create_renew_real_authority(control, config, tmp_path, monkeypat
         assert starts == []
         with manager.db.session() as db:
             db.add(TunnelGrant(user_id=local.id, enabled=True, epoch=1))
+        # The Centre consumed that tunnel ID: reuse is refused, a new one with a
+        # higher generation is the client's retry.
+        assert n.post('/v1/tunnels', headers=h, json=b).status_code == 409
+        b = dict(b, tunnel_id=str(uuid4()), generation=2)
         made = n.post('/v1/tunnels', headers=h, json=b)
         assert made.status_code == 200, made.text
         assert 0 < made.json()['remaining_ttl_ms'] <= 30000
@@ -55,9 +59,9 @@ def test_permit_create_renew_real_authority(control, config, tmp_path, monkeypat
         renewed = n.post('/v1/tunnels/'+b['tunnel_id']+'/renew', headers=h, json={})
         assert renewed.status_code == 200, renewed.text
         permits = [d for route,d in seen if route.endswith('/lease-permits')]
-        assert [d['operation'] for d in permits] == ['create','create','renew']
-        assert all((d['tunnel_id'],d['sandbox_id'],d['generation']) == (b['tunnel_id'],b['sandbox_id'],1) for d in permits)
-        assert len({d['request_id'] for d in permits}) == 3
+        assert [d['operation'] for d in permits] == ['create','create','create','renew']
+        assert all((d['tunnel_id'],d['sandbox_id'],d['generation']) == (b['tunnel_id'],b['sandbox_id'],2) for d in permits[2:])
+        assert len({d['request_id'] for d in permits}) == 4
         # Response corruption is denied before any manager mutation.
         import httpx
         import time

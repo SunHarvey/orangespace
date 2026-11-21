@@ -325,9 +325,29 @@ def fixture():
         run(str(HERE / "up"), b.sandbox, str(sleeper_b.pid), b.id)
         check(desktop_b, "B")
         check(desktop_a, "A", blocked=True)
+        # Node lease: each renewal extends the kernel permit; when renewals stop
+        # (client gone, node refused) it lapses on its own.
+        run(str(HERE / "down"), b.sandbox)
+        tunnel = str(uuid.uuid4())
+        lease = {k: v for k, v in b.policy.items() if k not in ("bindings", "ttl_seconds", "authorization")}
+        lease.update(b.policy["bindings"][b.sandbox], node_id=b.id, tunnel_id=tunnel, remaining_ms=6000)
+        stack.callback(lambda: gateway.lease_path(b.sandbox).unlink(missing_ok=True))
+        run(str(HERE / "lease"), b.sandbox, b.id, input=json.dumps(lease))
+        run(str(HERE / "up"), b.sandbox, str(sleeper_b.pid), b.id)
+        started = time.monotonic()
+        while time.monotonic() - started < 8:
+            check(desktop_b, "B")
+            run(str(HERE / "renew"), b.sandbox, tunnel, "6000")
+            time.sleep(2)
+        check(desktop_b, "B")
+        assert subprocess.run([str(HERE / "renew"), b.sandbox, str(uuid.uuid4()), "6000"]).returncode == 1
+        time.sleep(5.6)
+        check(desktop_b, "B", blocked=True)
+        assert subprocess.run([str(HERE / "status"), b.sandbox]).returncode == 1
+        run(str(HERE / "down"), b.sandbox)
         lab.assert_no_direct()
         print("PASS runtime node import and precedence, concurrent TCP/UDP/DNS egress, remote loss, local helper loss, explicit stop, "
-              "kernel expiry, persistent local reauthorization and revocation, sandbox HTTPS health, "
+              "kernel expiry, persistent local reauthorization and revocation, lease renewal and lapse, sandbox HTTPS health, "
               "sibling stream SHA-256, zero direct-canary requests")
 
 

@@ -34,6 +34,28 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(set(internal["bindings"]), {self.a})
         self.assertNotIn("node_id", internal)
 
+    def test_lease_carries_its_tunnel_and_a_bounded_budget(self):
+        lease = {**self.record, "tunnel_id": str(uuid4()), "remaining_ms": 20000}
+        del lease["authorization"]
+        with tempfile.TemporaryDirectory() as root, patch.object(gateway, "LEASES", Path(root)):
+            for change in ({"remaining_ms": 500}, {"remaining_ms": 30001}, {"remaining_ms": 2.5},
+                           {"remaining_ms": None}, {"tunnel_id": "bad"}, {"deadline": 1.0},
+                           {"authorization": "lease"}, {"ttl_seconds": 30}, {"node_id": self.b}):
+                with self.subTest(change=change), self.assertRaises((ValueError, TypeError)):
+                    gateway.store_lease(self.a, self.node, BytesIO(json.dumps({**lease, **change}).encode()))
+            self.assertEqual(list(Path(root).iterdir()), [])
+            gateway.store_lease(self.a, self.node, BytesIO(json.dumps(lease).encode()))
+            stored = json.loads((Path(root) / (self.a + ".json")).read_text())
+            self.assertEqual(stored["authorization"], "lease")
+            self.assertNotIn("remaining_ms", stored)
+            outbound, ttl = gateway.node_policy(gateway.scoped_record(stored, self.a, self.node), self.a)
+            self.assertTrue(19 < ttl <= 19.5)
+            self.assertEqual(outbound["password"], "fixture-secret")
+        # A lease that has run out cannot start a gateway.
+        expired = {**self.record, "authorization": "lease", "tunnel_id": str(uuid4()), "deadline": 1.0}
+        with self.assertRaises(ValueError):
+            gateway.scoped_record(expired, self.a, self.node)
+
     @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "root-only guest storage")
     def test_private_storage_atomicity_and_precedence(self):
         with ExitStack() as stack:

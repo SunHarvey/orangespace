@@ -25,10 +25,13 @@ def payload(epoch=0, **changes):
     return dict(dict(schema=1, expected_grant_epoch=epoch, enabled=True, scopes=['tunnel'], valid_until=None, reason='grant fixture'), **changes)
 
 
-def test_grant_creation_rbac_and_mapping_gate(control):
+def test_grant_creation_rbac_and_centre_identity(control):
     client, engine, admin, user, ordinary, nid, path = fixture(control)
-    assert client.put(path, headers=admin, json=payload()).status_code == 200
     assert client.get('/control/v1/me/nodes', headers=ordinary).json()['items'] == []
+    assert client.put(path, headers=admin, json=payload()).status_code == 200
+    # Nodes hold no accounts: the grant also files the user under the central ID.
+    rows = client.get('/control/v1/me/nodes', headers=ordinary).json()['items']
+    assert [(r['node_id'], r['legacy_user_id']) for r in rows] == [(show(nid), user['central_user_id'])]
     assert client.put(path, headers=ordinary, json=payload()).status_code == 403
     assert client.get('/control/v1/admin/grants', headers=ordinary).status_code == 403
     assert client.get('/control/v1/admin/grants').status_code == 401

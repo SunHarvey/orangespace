@@ -10,7 +10,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.exceptions import InvalidSignature
 from .enrollment_schema import enrollments, challenges
 from .schema_v1 import nodes
-from .security import ControlError, uid, show, now, authority_lock, record_audit, throttle
+from .security import ControlError, uid, show, now, authority_lock, record_audit, throttle, canonical
 
 
 def digest(domain, token):
@@ -48,33 +48,9 @@ def install_routes(app, engine, body, auth, page, identity):
     @app.post('/control/v1/admin/node-enrollments', status_code=201)
     async def create(request: Request):
         data = await body(request, {'node_id','alias','display_name','api_origin','tls_server_name','expected_key_fingerprint','reason'})
-        nid = identity(data['node_id'])
-        reason(data)
-        try:
-            if not isinstance(data['alias'], str) or not re.fullmatch(r'[a-z0-9][a-z0-9_.-]{0,63}', data['alias']):
-                raise ValueError()
-            if not isinstance(data['display_name'], str) or not 1 <= len(data['display_name']) <= 128:
-                raise ValueError()
-            origin = data['api_origin']
-            parsed = urlsplit(origin)
-            if not isinstance(origin, str) or len(origin) > 512 or parsed.scheme != 'https' or not parsed.hostname or parsed.username is not None or parsed.password is not None or parsed.path or parsed.query or parsed.fragment or parsed.port == 0 or origin != 'https://' + parsed.netloc or any(ord(c) <= 32 for c in origin):
-                raise ValueError()
-            tls = data['tls_server_name']
-            if not isinstance(tls, str) or not 1 <= len(tls) <= 253 or not re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?', tls) or any(not label or len(label) > 63 or label.startswith('-') or label.endswith('-') for label in tls.split('.')):
-                raise ValueError()
-            fingerprint = data['expected_key_fingerprint']
-            if not isinstance(fingerprint, str) or not re.fullmatch('[0-9a-f]{64}', fingerprint):
-                raise ValueError()
-        except (ValueError, TypeError, AttributeError):
-            raise ControlError(422, 'invalid_input') from None
         with engine.begin() as conn:
             actor, _ = auth(conn, request, True)
-            if conn.execute(select(nodes.c.id).where((nodes.c.id == nid) | (nodes.c.alias == data['alias']))).first():
-                raise ControlError(409, 'conflict')
-            eid, token, expiry = uid(), secrets.token_urlsafe(32), now() + 600
-            conn.execute(enrollments.insert().values(id=eid,node_id=nid,alias=data['alias'],display_name=data['display_name'],api_origin=origin,tls_server_name=tls,fingerprint=bytes.fromhex(fingerprint),token_digest=digest(b'enrollment',token),expires_at=expiry,challenge_count=0))
-            record_audit(conn,actor['id'],'node.enrollment',nid,None,1,data['reason'],request.state.request_id)
-            return dict(schema=1,enrollment_id=show(eid),enrollment_token=token,node_id=show(nid),expires_at=expiry)
+            return create_enrollment(conn, actor['id'], data, request.state.request_id)
 
     @app.post('/control/v1/admin/node-enrollments/{eid}/renew')
     async def renew(eid: str, request: Request):
@@ -171,20 +147,9 @@ def install_routes(app, engine, body, auth, page, identity):
     async def activate(nid: str,request: Request):
         data = await body(request, {'expected_node_epoch','expected_config_revision','reason'})
         target = identity(nid)
-        reason(data)
-        for field in ('expected_node_epoch','expected_config_revision'):
-            if type(data[field]) is not int or not 1 <= data[field] <= 9007199254740991:
-                raise ControlError(422,'invalid_input')
         with engine.begin() as conn:
             actor,_ = auth(conn,request,True)
-            row = conn.execute(select(nodes).where(nodes.c.id == target).with_for_update()).mappings().first()
-            if row is None:
-                raise ControlError(404,'not_found')
-            if row['state'] != 'pending' or row['public_key'] is None or row['machine_token_digest'] is None or row['node_epoch'] != data['expected_node_epoch'] or row['config_revision'] != data['expected_config_revision']:
-                raise ControlError(409,'conflict')
-            conn.execute(nodes.update().where(nodes.c.id == target).values(state='active'))
-            record_audit(conn,actor['id'],'node.activate',target,row['node_epoch'],row['node_epoch'],data['reason'],request.state.request_id)
-            return dict(schema=1,node_id=show(target),state='active',node_epoch=row['node_epoch'],config_revision=row['config_revision'])
+            return activate_node(conn, actor['id'], target, data, request.state.request_id)
 
     @app.post('/control/v1/internal/heartbeat')
     async def heartbeat(request: Request):
@@ -210,3 +175,56 @@ def install_routes(app, engine, body, auth, page, identity):
 
     from .identity import install_routes as install_identity
     install_identity(app, engine, body, auth, page, identity)
+
+
+def _reason(data):
+    if not isinstance(data['reason'], str) or not 1 <= len(data['reason'].strip()) <= 512:
+        raise ControlError(422, 'invalid_input')
+
+
+def create_enrollment(conn, actor_id, data, request_id):
+    """Caller holds the authority lock. Returns the one-time enrollment token."""
+    try:
+        nid = canonical(data['node_id'])
+    except (ValueError, TypeError, AttributeError):
+        raise ControlError(422, 'invalid_input') from None
+    _reason(data)
+    try:
+        if not isinstance(data['alias'], str) or not re.fullmatch(r'[a-z0-9][a-z0-9_.-]{0,63}', data['alias']):
+            raise ValueError()
+        if not isinstance(data['display_name'], str) or not 1 <= len(data['display_name']) <= 128:
+            raise ValueError()
+        origin = data['api_origin']
+        parsed = urlsplit(origin)
+        if not isinstance(origin, str) or len(origin) > 512 or parsed.scheme != 'https' or not parsed.hostname or parsed.username is not None or parsed.password is not None or parsed.path or parsed.query or parsed.fragment or parsed.port == 0 or origin != 'https://' + parsed.netloc or any(ord(c) <= 32 for c in origin):
+            raise ValueError()
+        tls = data['tls_server_name']
+        if not isinstance(tls, str) or not 1 <= len(tls) <= 253 or not re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?', tls) or any(not label or len(label) > 63 or label.startswith('-') or label.endswith('-') for label in tls.split('.')):
+            raise ValueError()
+        fingerprint = data['expected_key_fingerprint']
+        if not isinstance(fingerprint, str) or not re.fullmatch('[0-9a-f]{64}', fingerprint):
+            raise ValueError()
+    except (ValueError, TypeError, AttributeError):
+        raise ControlError(422, 'invalid_input') from None
+    if conn.execute(select(nodes.c.id).where((nodes.c.id == nid) | (nodes.c.alias == data['alias']))).first():
+        raise ControlError(409, 'conflict')
+    eid, token, expiry = uid(), secrets.token_urlsafe(32), now() + 600
+    conn.execute(enrollments.insert().values(id=eid,node_id=nid,alias=data['alias'],display_name=data['display_name'],api_origin=origin,tls_server_name=tls,fingerprint=bytes.fromhex(fingerprint),token_digest=digest(b'enrollment',token),expires_at=expiry,challenge_count=0))
+    record_audit(conn,actor_id,'node.enrollment',nid,None,1,data['reason'],request_id)
+    return dict(schema=1,enrollment_id=show(eid),enrollment_token=token,node_id=show(nid),expires_at=expiry)
+
+
+def activate_node(conn, actor_id, target, data, request_id):
+    """Caller holds the authority lock; target is the canonical node ID bytes."""
+    _reason(data)
+    for field in ('expected_node_epoch','expected_config_revision'):
+        if type(data[field]) is not int or not 1 <= data[field] <= 9007199254740991:
+            raise ControlError(422,'invalid_input')
+    row = conn.execute(select(nodes).where(nodes.c.id == target).with_for_update()).mappings().first()
+    if row is None:
+        raise ControlError(404,'not_found')
+    if row['state'] != 'pending' or row['public_key'] is None or row['machine_token_digest'] is None or row['node_epoch'] != data['expected_node_epoch'] or row['config_revision'] != data['expected_config_revision']:
+        raise ControlError(409,'conflict')
+    conn.execute(nodes.update().where(nodes.c.id == target).values(state='active'))
+    record_audit(conn,actor_id,'node.activate',target,row['node_epoch'],row['node_epoch'],data['reason'],request_id)
+    return dict(schema=1,node_id=show(target),state='active',node_epoch=row['node_epoch'],config_revision=row['config_revision'])

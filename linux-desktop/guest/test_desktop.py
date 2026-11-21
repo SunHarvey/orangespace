@@ -28,6 +28,7 @@ class DesktopTests(unittest.TestCase):
         self.info = {"Id": "container-a", "Name": "osdesk-" + self.sandbox, "State": {"Pid": 123, "Running": True},
                      "Config": {"Labels": {desktop.LABEL + "node": self.node}}}
         self.patch("ROOT", self.root / "state")
+        self.patch("LEASES", self.root / "leases")
 
     def patch(self, name, *args, **kwargs):
         mock = patch.object(desktop, name, *args, **kwargs)
@@ -226,12 +227,16 @@ class DesktopTests(unittest.TestCase):
         slot = desktop.slot_of(directory)
         (directory / "home").mkdir()
         (directory / "home" / "file.txt").write_text("private")
+        (self.root / "leases").mkdir()
+        lease = self.root / "leases" / (self.sandbox + ".json")
+        lease.write_text("{}")
         self.patch("inspect", return_value=None)
         stop = self.patch("stop")
         reply = desktop.run("delete", self.user, self.sandbox)
         self.assertTrue(reply["deleted"])
         stop.assert_called_once()
         self.assertFalse(directory.exists())
+        self.assertFalse(lease.exists())
         self.assertEqual(desktop.slot_of(self.instance(str(uuid.uuid4()))), slot)
 
     def test_invalid_id_rejected_before_io(self):
@@ -264,6 +269,44 @@ class DesktopTests(unittest.TestCase):
         with patch.object(subprocess, "run") as invoke, self.assertRaisesRegex(desktop.DesktopError, "32768"):
             desktop.configure(self.sandbox, self.node, io.BytesIO(b"x" * 32769))
         invoke.assert_not_called()
+
+    def test_lease_is_stored_and_rebuilds_only_a_running_desktop_on_its_node(self):
+        inspect = self.patch("inspect", return_value=None)
+        gateway = self.patch("gateway", return_value=True)
+        self.patch("describe", side_effect=lambda user, sandbox, info: {"desktop": "running" if info else "stopped"})
+        secret = b'{"password":"fixture"}'
+        with patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as invoke:
+            desktop.run("lease", self.user, self.sandbox, self.node, policy_stream=io.BytesIO(secret))
+            self.assertEqual(invoke.call_args.args[0], [str(desktop.NETWORK / "lease"), self.sandbox, self.node])
+            self.assertEqual(invoke.call_args.kwargs["input"], secret)
+            gateway.assert_not_called()  # stopped: the lease waits for the next start
+            inspect.return_value = self.info
+            desktop.run("lease", self.user, self.sandbox, self.node, policy_stream=io.BytesIO(secret))
+            gateway.assert_called_once_with("up", self.sandbox, "123", self.node)
+            with self.assertRaisesRegex(desktop.DesktopError, "another node"):
+                desktop.run("lease", self.user, self.sandbox, str(uuid.uuid4()), policy_stream=io.BytesIO(secret))
+            with self.assertRaisesRegex(desktop.DesktopError, "account"):
+                desktop.run("lease", str(uuid.uuid4()), self.sandbox, self.node, policy_stream=io.BytesIO(secret))
+            invoke.return_value = subprocess.CompletedProcess([], 1)
+            with self.assertRaisesRegex(desktop.DesktopError, "rejected"):
+                desktop.run("lease", self.user, self.sandbox, self.node, policy_stream=io.BytesIO(secret))
+        self.assertEqual(gateway.call_count, 1)
+
+    def test_renew_extends_only_with_a_bounded_budget(self):
+        self.instance()
+        gateway = self.patch("gateway", return_value=True)
+        tunnel = str(uuid.uuid4())
+        reply = desktop.run("renew", self.user, self.sandbox, tunnel, remaining_ms="20000")
+        self.assertTrue(reply["renewed"])
+        gateway.assert_called_once_with("renew", self.sandbox, tunnel, "20000")
+        for budget in ("0", "30001", "-1", "1e3", ""):
+            with self.subTest(budget=budget), self.assertRaisesRegex(desktop.DesktopError, "budget"):
+                desktop.run("renew", self.user, self.sandbox, tunnel, remaining_ms=budget)
+        gateway.return_value = False
+        with self.assertRaisesRegex(desktop.DesktopError, "renewal rejected"):
+            desktop.run("renew", self.user, self.sandbox, tunnel, remaining_ms="20000")
+        with self.assertRaisesRegex(desktop.DesktopError, "account"):
+            desktop.run("renew", str(uuid.uuid4()), self.sandbox, tunnel, remaining_ms="20000")
 
 
 if __name__ == "__main__":

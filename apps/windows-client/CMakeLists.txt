@@ -172,6 +172,17 @@ if(WIN32)
   # Native login/chain diagnostics share the same authenticated service client as UI.
   add_executable(OrangeSpaceLogin src/login_win.cpp)
   target_link_libraries(OrangeSpaceLogin PRIVATE orangespace_node_session orangespace_service_client)
+  # L3 acceptance front end: Centre sign-in, one node session and tunnel lease
+  # per sandbox, renewals that keep each sandbox's kernel permit alive.
+  add_executable(orangespace-sandbox src/sandbox_session_win.cpp)
+  target_include_directories(orangespace-sandbox PRIVATE include ../windows-service/include)
+  target_link_libraries(orangespace-sandbox PRIVATE orangespace_node_session orangespace_wsl_runtime bcrypt)
+  if(MINGW)
+    target_link_options(orangespace-sandbox PRIVATE -municode)
+  endif()
+  if(MSVC)
+    target_compile_options(orangespace-sandbox PRIVATE /W4 /permissive- /utf-8)
+  endif()
   if(TARGET orangespace-node-session-tests)
     target_link_libraries(orangespace-node-session-tests PRIVATE orangespace_node_session)
     add_executable(orangespace-node-tls-rejection-tests tests/node_tls_rejection_win.cpp)

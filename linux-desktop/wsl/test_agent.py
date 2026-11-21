@@ -150,6 +150,28 @@ print(json.dumps({{"ok": sys.argv[1]}}))
             self.agent.perform({"op": "desktop.configure", "user": self.user, "sandbox": self.sandbox,
                                 "node": self.node, "settings": "x" * 32769})
 
+    def test_lease_credentials_go_on_stdin_and_renewals_are_bounded(self):
+        tunnel = str(uuid.uuid4())
+        lease = '{"node_id":"%s","password":"fixture-secret","remaining_ms":20000}' % self.node
+        self.agent.perform({"op": "desktop.lease", "user": self.user, "sandbox": self.sandbox,
+                            "node": self.node, "lease": lease})
+        self.agent.perform({"op": "desktop.renew", "user": self.user, "sandbox": self.sandbox,
+                            "tunnel": tunnel, "remaining_ms": 20000})
+        lease_call, renew_call = self.calls()
+        self.assertEqual(lease_call["args"], ["lease", self.user, self.sandbox, self.node])
+        self.assertEqual(lease_call["stdin"], lease)
+        self.assertNotIn("fixture-secret", " ".join(lease_call["args"]))
+        self.assertEqual(renew_call["args"], ["renew", self.user, self.sandbox, tunnel, "20000"])
+        for bad in ({"remaining_ms": 0}, {"remaining_ms": 30001}, {"remaining_ms": True},
+                    {"remaining_ms": 1.5}, {"tunnel": "x"}):
+            with self.subTest(bad=bad), self.assertRaises((ValueError, TypeError, AttributeError)):
+                self.agent.perform({"op": "desktop.renew", "user": self.user, "sandbox": self.sandbox,
+                                    "tunnel": tunnel, "remaining_ms": 20000, **bad})
+        with self.assertRaisesRegex(ValueError, "32768"):
+            self.agent.perform({"op": "desktop.lease", "user": self.user, "sandbox": self.sandbox,
+                                "node": self.node, "lease": "x" * 32769})
+        self.assertEqual(len(self.calls()), 2)
+
     def test_desktops_still_running_are_stopped_when_the_client_goes_away(self):
         other = str(uuid.uuid4())
         for sandbox in (self.sandbox, other):

@@ -21,6 +21,10 @@ from uuid import UUID
 STATE = Path("/run/orangespace-network")
 NODES = Path("/etc/orangespace/nodes")
 INSTANCES = Path("/var/lib/orangespace/desktop/instances")
+# Node leases live on tmpfs only: their credentials never reach a disk.
+LEASES = Path("/run/orangespace/leases")
+LEASE_MARGIN_MS = 500
+MAX_LEASE_MS = 30000
 NETNS = Path("/run/netns")
 POOL = ipaddress.IPv4Address("10.243.0.0")
 DESKTOP_PEER = "192.168.254.1"
@@ -53,7 +57,7 @@ def valid_tls_name(name):
 
 def node_policy(record, sandbox_id):
     allowed = {"endpoint_ip", "endpoint_port", "tls_server_name", "bindings",
-               "ttl_seconds", "authorization", "certificate_pem", "probe"}
+               "ttl_seconds", "authorization", "certificate_pem", "probe", "tunnel_id", "deadline"}
     if not isinstance(record, dict) or record.keys() - allowed:
         raise GatewayError("invalid node file fields")
     if not isinstance(record["endpoint_ip"], str):
@@ -65,7 +69,19 @@ def node_policy(record, sandbox_id):
     ttl = record.get("ttl_seconds")
     if type(port) is not int or not 1 <= port <= 65535:
         raise GatewayError("invalid node port")
-    if "authorization" in record:
+    lease = record.get("authorization") == "lease"
+    if lease:
+        # A node lease: the permit lasts exactly as long as the lease the client
+        # last renewed (minus a margin), then the kernel withdraws it.
+        if "ttl_seconds" in record or type(record.get("deadline")) is not float:
+            raise GatewayError("invalid node lease")
+        uuid_text(record.get("tunnel_id"))
+        ttl = record["deadline"] - time.clock_gettime(time.CLOCK_BOOTTIME)
+        if not 0.001 <= ttl <= MAX_LEASE_MS / 1000:
+            raise GatewayError("node lease expired")
+    elif "tunnel_id" in record or "deadline" in record:
+        raise GatewayError("lease fields without a node lease")
+    elif "authorization" in record:
         if record["authorization"] != "local-persistent" or "ttl_seconds" in record:
             raise GatewayError("ambiguous or unknown local node authorization")
     elif type(ttl) is not int or not 1 <= ttl <= 3600:
@@ -142,8 +158,47 @@ def scoped_record(flat, sandbox_id, node_id):
     return record
 
 
+def lease_path(sandbox_id):
+    return LEASES / (uuid_text(sandbox_id) + ".json")
+
+
+def write_private(path, value):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temp = path.with_name(".import-" + secrets.token_hex(16))
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "w") as out:
+            json.dump(value, out)
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def store_lease(sandbox_id, node_id, stream):
+    """Keep one sandbox's current node lease (from the client) in /run."""
+    raw = stream.read(65537)
+    if len(raw) > 65536:
+        raise GatewayError("node lease exceeds 64 KiB")
+    flat = json.loads(raw, object_pairs_hook=unique_fields)
+    if not isinstance(flat, dict) or "deadline" in flat or "authorization" in flat:
+        raise GatewayError("invalid node lease")
+    remaining = flat.pop("remaining_ms", None)
+    if type(remaining) is not int or not LEASE_MARGIN_MS < remaining <= MAX_LEASE_MS:
+        raise GatewayError("invalid node lease budget")
+    flat.update(authorization="lease",
+                deadline=time.clock_gettime(time.CLOCK_BOOTTIME) + (remaining - LEASE_MARGIN_MS) / 1000)
+    scoped_record(flat, sandbox_id, uuid_text(node_id))
+    write_private(lease_path(sandbox_id), flat)
+
+
 def read_node(sandbox_id, node_id):
     filename = uuid_text(node_id) + ".json"
+    try:
+        flat = read_record(lease_path(sandbox_id))
+    except FileNotFoundError:
+        flat = None
+    if flat is not None and flat.get("node_id") == node_id:
+        return scoped_record(flat, sandbox_id, node_id), "lease"
     try:
         with instance_nodes(sandbox_id) as directory:
             private = read_record(filename, directory)
@@ -222,12 +277,13 @@ def helper_config(outbound):
 
 
 def root_policy(table, wan, gw_ip, node, port, ttl):
+    ttl_ms = max(1, int(ttl * 1000))
     # Per-interface rules also cover established packets and automatically expire.
     return f"""table inet {table} {{
  set endpoints {{
   type ipv4_addr . inet_service
   flags timeout
-  elements = {{ {node} . {port} timeout {ttl}s }}
+  elements = {{ {node} . {port} timeout {ttl_ms}ms }}
  }}
  chain input {{
   type filter hook input priority -20; policy accept;
@@ -387,6 +443,7 @@ class Gateway:
             if os.path.samestat(inode, os.stat("/proc/self/ns/net")):
                 raise GatewayError("desktop must have a private network namespace")
             data = self.reserve(node_id, source, outbound, probe)
+            data["tunnel"] = record.get("tunnel_id")
             try:
                 run("ip", "netns", "attach", self.desk, str(pid))
                 if not os.path.samestat(inode, (NETNS / self.desk).stat()):
@@ -462,6 +519,31 @@ class Gateway:
         if not self.ready():
             raise GatewayError("gateway authorization expired before publication")
 
+    def renew(self, tunnel_id, remaining_ms):
+        """Extend the kernel permit to the lease the client just renewed."""
+        uuid_text(tunnel_id)
+        if type(remaining_ms) is not int or not LEASE_MARGIN_MS < remaining_ms <= MAX_LEASE_MS:
+            raise GatewayError("invalid node lease budget")
+        path = lease_path(self.id)
+        flat = read_record(path)
+        if flat.get("authorization") != "lease" or flat.get("tunnel_id") != tunnel_id:
+            raise GatewayError("not the sandbox's current tunnel")
+        now = time.clock_gettime(time.CLOCK_BOOTTIME)
+        flat["deadline"] = now + (remaining_ms - LEASE_MARGIN_MS) / 1000
+        write_private(path, flat)
+        if not self.state.exists():
+            return
+        data = json.loads(self.state.read_text())
+        if data.get("source") != "lease" or data.get("tunnel") != tunnel_id:
+            return
+        # One nft transaction: the permit is replaced, never briefly absent.
+        timeout = remaining_ms - LEASE_MARGIN_MS
+        run("nft", "-f", "-", stdin=(f"flush set inet {self.table} endpoints\n"
+                                     f"add element inet {self.table} endpoints "
+                                     f"{{ {data['endpoint']} . {data['port']} timeout {timeout}ms }}\n"))
+        data["ready_until"] = flat["deadline"]
+        save(self.state, data)
+
     def ready(self):
         if not self.state.exists():
             return False
@@ -535,6 +617,13 @@ def main(argv=None):
     config = commands.add_parser("configure")
     config.add_argument("sandbox_id")
     config.add_argument("node_id")
+    lease = commands.add_parser("lease")
+    lease.add_argument("sandbox_id")
+    lease.add_argument("node_id")
+    renew = commands.add_parser("renew")
+    renew.add_argument("sandbox_id")
+    renew.add_argument("tunnel_id")
+    renew.add_argument("remaining_ms", type=int)
     for name in ("down", "status", "probe", "probe-once", "supervise"):
         commands.add_parser(name).add_argument("sandbox_id")
     args = parser.parse_args(argv)
@@ -559,6 +648,10 @@ def main(argv=None):
                 if gateway.state.exists():
                     raise GatewayError("stop the sandbox gateway before configuring a node")
                 configure(gateway.id, args.node_id, sys.stdin.buffer)
+            elif args.operation == "lease":
+                store_lease(gateway.id, args.node_id, sys.stdin.buffer)
+            elif args.operation == "renew":
+                gateway.renew(args.tunnel_id, args.remaining_ms)
             elif args.operation == "probe":
                 return gateway.probe()
             elif not gateway.ready():
