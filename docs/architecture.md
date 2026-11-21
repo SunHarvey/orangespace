@@ -15,7 +15,7 @@ flowchart LR
     subgraph V["WSL2 发行版 OrangeSpace（Debian 13）"]
       AG["客体管理代理（root）"]
       subgraph SA["沙盒 A"]
-        XA["私有显示 A（Xephyr）"] --- DA["桌面容器 A（Podman）<br/>LXQt · Chromium · 文件管理 · fcitx5"]
+        XA["私有虚拟显示 A（Xvnc，常驻）"] --- DA["桌面容器 A（Podman）<br/>LXQt · Chromium · 文件管理 · fcitx5"]
       end
       subgraph SB["沙盒 B"]
         XB["私有显示 B"] --- DB["桌面容器 B"]
@@ -27,7 +27,7 @@ flowchart LR
       AG --> SA & SB & GA & GB
     end
     C <-->|wsl.exe 子进程的标准输入/输出| AG
-    XA & XB -->|WSLg| WIN["每个沙盒一个 Windows 窗口"]
+    XA & XB -->|查看器 vncviewer · WSLg| WIN["每个沙盒一个 Windows 窗口（可关闭、可重连）"]
   end
   GA -->|TUIC 租约 A| NA["节点 A"]
   GB -->|TUIC 租约 B| NB["节点 B"]
@@ -42,7 +42,7 @@ flowchart LR
 
 ## 发行版 OrangeSpace
 
-- 本项目构建的 Debian 13 根文件系统，内含客体代理、Podman、桌面镜像、sing-box、网关、Xephyr、fcitx5。随附完整软件包清单与源码获取方式。
+- 本项目构建的 Debian 13 根文件系统，内含客体代理、Podman、桌面镜像、sing-box、网关、TigerVNC（Xvnc 与查看器）、fcitx5。随附完整软件包清单与源码获取方式。
 - `/etc/wsl.conf`：开启 systemd；**关闭 Windows 磁盘自动挂载与互操作**（`[automount] enabled=false`，`[interop] enabled=false`，`appendWindowsPath=false`）；默认用户非特权。
 - 用户数据（各沙盒 HOME、浏览器数据、下载）与系统部分分开，升级系统时保留数据。
 
@@ -52,9 +52,9 @@ flowchart LR
 |---|---|
 | 绑定 | `(user_id, sandbox_id, node_id, generation, tunnel_id)` 显式绑定。一个沙盒同时只绑定一个节点、一个网关、一个 TUIC 凭据、一个显示；同节点的不同沙盒也不共用这些对象 |
 | 桌面容器 | Podman（rootful，由代理调用）。非 root 用户、独立 HOME、只读根、无新权限、seccomp、Landlock、cgroup 资源限制；保留 Chromium 自身沙盒 |
-| 显示 | 每沙盒一个 Xephyr，作为 WSLg 客户端出现为一个窗口，标题含沙盒名。容器只挂载本沙盒的显示 socket 与 Xauthority cookie，**不得访问 WSLg 公共显示 `:0`**；私有 `/tmp/.X11-unix` 在本沙盒的挂载命名空间里 |
+| 显示 | 每沙盒一个常驻虚拟显示（Xvnc），不依赖 WSLg 和远程桌面连接；以本沙盒专用账户运行，无网络、看不到 `/mnt`、不开 TCP。容器只挂载本沙盒的 X socket 与 Xauthority cookie，**不得访问 WSLg 公共显示 `:0`**。Windows 窗口是查看器（vncviewer，WSLg 客户端），经容器看不到的私有 Unix socket 连到虚拟显示，标题含沙盒名；关窗不停桌面，再次打开即重连，WSLg 重启后自动恢复 |
 | 输入法 | Windows 输入法传不进 Linux 窗口。每个沙盒会话内运行 fcitx5 拼音，默认开启，左 Shift 切换中英（Ctrl+空格 常被客户端操作系统截走） |
-| 剪贴板 | 默认隔离：沙盒与 Windows、沙盒与沙盒都不互通，Xephyr 不桥接剪贴板 |
+| 剪贴板 | 默认隔离：沙盒与 Windows、沙盒与沙盒都不互通。虚拟显示与查看器两端都关闭剪贴板传送，查看器菜单关闭 |
 | 文件 | 文件管理器管理本沙盒 HOME。节点个人文件由客户端文件面板管理，可经代理在"节点文件 ↔ 本沙盒下载目录"之间传送 |
 
 ## 网络：全流量走节点

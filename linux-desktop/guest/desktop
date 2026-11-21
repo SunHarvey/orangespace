@@ -5,10 +5,16 @@ Called by the guest agent (wsl/agent.py). One sandbox =
   - a Podman container `osdesk-<sandbox>` (desktop image), rootless inside a
     fixed per-sandbox UID/GID block, no network until its gateway attaches,
     read-only root, no capabilities, seccomp, resource limits;
-  - a private X display: an Xephyr window (a WSLg client) run as the systemd
-    unit `osdisp-<sandbox>`, whose /tmp/.X11-unix is this sandbox's display
-    directory. The container mounts only that directory, so it can reach its
-    own display but never WSLg's shared :0;
+  - a private virtual X display (Xvnc, systemd unit `osdisp-<sandbox>`) that
+    keeps running without any window: it has no network and no access to
+    WSLg or /mnt. Its /tmp/.X11-unix is this sandbox's display directory, the
+    only display path the container mounts;
+  - a viewer window (vncviewer, a WSLg client, unit `osview-<sandbox>`) that
+    shows the display over a private Unix socket the container never sees.
+    Closing the window leaves the desktop running and `start` reopens it; if
+    WSLg goes away (e.g. a remote session disconnects), the viewer retries
+    until it can show the desktop again. Clipboard transfer is disabled on
+    both ends, so nothing crosses between the sandbox and Windows;
   - a persistent HOME and node configuration under instances/<sandbox>.
 
   desktop start     USER SANDBOX NODE TITLE
@@ -30,18 +36,21 @@ import stat
 import struct
 import subprocess
 import sys
+import syslog
 import time
 import uuid
 
 ROOT = Path("/var/lib/orangespace/desktop")
-DISPLAY_ROOT = Path("/run/orangespace/display")
+DISPLAY_ROOT = Path("/run/orangespace/display")   # per sandbox: X socket + cookie (container-visible)
+VIEW_ROOT = Path("/run/orangespace/view")         # per sandbox: viewer socket (never container-visible)
 NETWORK = Path("/opt/orangespace/network")
 GUEST = Path("/opt/orangespace/guest")
 PODMAN = ("/usr/bin/podman",)
 IMAGE = "localhost/orangespace/desktop:dev"
 SECCOMP = Path("/etc/orangespace/desktop-seccomp.json")
-WSLG_X0 = "/mnt/wslg/.X11-unix/X0"
-DISPLAY_USER = "desk"            # runs Xephyr (a WSLg client); never the sandbox
+WSLG_X11 = "/mnt/wslg/.X11-unix"
+DISPLAY_UID_BASE = 190000        # display + viewer of slot s run as uid 190000+s: per sandbox,
+                                 # outside every container's UID block
 LABEL = "io.orangespace.desktop."
 GUEST_UID = 1000                 # the desktop user inside the container
 UID_BASE, UID_BLOCK, MAX_SLOTS = 200000, 65536, 64
@@ -106,7 +115,14 @@ def inspect(sandbox, user):
 
 
 def gateway(operation, sandbox, *args):
-    return execute(str(NETWORK / operation), sandbox, *args).returncode == 0
+    result = execute(str(NETWORK / operation), sandbox, *args)
+    if result.returncode and operation != "status":
+        # Gateway errors name the failed step, never credentials. Keep the
+        # reason in the distribution's journal; the reply stays generic.
+        reason = (result.stderr or "").strip().splitlines()[-1:] or ["no message"]
+        syslog.openlog("orangespace-desktop")
+        syslog.syslog(syslog.LOG_WARNING, f"gateway {operation} {sandbox} failed: {reason[0][:200]}")
+    return result.returncode == 0
 
 
 def disconnect(sandbox):
@@ -182,43 +198,114 @@ def authority(cookie, number):
     return b"\xff\xff" + b"".join(struct.pack("!H", len(s)) + s for s in fields)
 
 
+def display_uid(slot):
+    return DISPLAY_UID_BASE + slot
+
+
+def display_account(slot):
+    """The system account (uid = gid = display_uid) of this slot's display and
+    viewer, created on first use; systemd needs a passwd entry to run as it."""
+    uid, name = display_uid(slot), f"osdisp{slot}"
+    try:
+        entry = pwd.getpwuid(uid)
+    except KeyError:
+        checked("/usr/sbin/groupadd", "--system", "--gid", str(uid), name)
+        checked("/usr/sbin/useradd", "--system", "--uid", str(uid), "--gid", str(uid), "--no-create-home",
+                "--home-dir", "/nonexistent", "--shell", "/usr/sbin/nologin", name)
+        return uid
+    if entry.pw_name != name or entry.pw_gid != uid:
+        raise DesktopError("display account conflicts with an existing user")
+    return uid
+
+
+def view_unit(sandbox):
+    return "osview-" + sandbox
+
+
+# Common confinement of both units: their own UID, no new privileges, no
+# network namespace access, read-only system, no Windows drives.
+CONFINED = ("--property=NoNewPrivileges=yes", "--property=PrivateNetwork=yes",
+            "--property=PrivateTmp=yes", "--property=ProtectSystem=strict", "--property=ProtectHome=yes",
+            "--property=RestrictSUIDSGID=yes", "--property=LockPersonality=yes", "--property=UMask=0077")
+NO_CLIPBOARD_SERVER = ("-AcceptCutText=0", "-SendCutText=0", "-SetPrimary=0", "-SendPrimary=0")
+NO_CLIPBOARD_VIEWER = ("-AcceptClipboard=0", "-SendClipboard=0", "-SetPrimary=0", "-SendPrimary=0")
+
+
 def start_display(sandbox, slot, title):
-    """Starts this sandbox's Xephyr window and returns its display directory."""
+    """Starts this sandbox's virtual display and returns its display directory and number."""
     number = DISPLAY_BASE + slot
-    directory = DISPLAY_ROOT / sandbox
+    directory, view = DISPLAY_ROOT / sandbox, VIEW_ROOT / sandbox
     stop_display(sandbox)
-    DISPLAY_ROOT.mkdir(mode=0o755, parents=True, exist_ok=True)
-    directory.mkdir(mode=0o755)
-    # Xephyr itself connects to WSLg through this link; inside the container
-    # the link dangles (no /mnt/wslg there).
-    (directory / "X0").symlink_to(WSLG_X0)
+    uid = display_account(slot)
+    # Explicit modes: this runs under umask 077, and the display account must
+    # be able to reach its own directories (and nothing else under them).
+    for root in (DISPLAY_ROOT.parent, DISPLAY_ROOT, VIEW_ROOT):
+        root.mkdir(parents=True, exist_ok=True)
+        root.chmod(0o755)
+    directory.mkdir()
+    directory.chmod(0o755)
+    view.mkdir()
+    view.chmod(0o700)
     auth = directory / "Xauthority"
     auth.write_bytes(authority(os.urandom(16), number))
     auth.chmod(0o444)
-    desk = pwd.getpwnam(DISPLAY_USER)
-    os.chown(directory, desk.pw_uid, desk.pw_gid)   # Xephyr creates its socket here
+    for path in (directory, view):
+        os.chown(path, uid, uid)      # the X server and the viewer create their sockets here
     checked("/usr/bin/systemd-run", "--quiet", "--collect", "--unit=" + display_unit(sandbox),
-            "--property=User=" + DISPLAY_USER, f"--property=BindPaths={directory}:/tmp/.X11-unix",
-            "--setenv=DISPLAY=:0", "--setenv=WAYLAND_DISPLAY=",
-            "/usr/bin/Xephyr", f":{number}", "-auth", "/tmp/.X11-unix/Xauthority", "-screen", SCREEN,
-            "-resizeable", "-nolisten", "tcp", "-noreset", "-extension", "MIT-SHM", "-title", title)
-    socket = directory / f"X{number}"
+            f"--uid={uid}", f"--gid={uid}", *CONFINED, "--property=InaccessiblePaths=/mnt",
+            f"--property=BindPaths={directory}:/tmp/.X11-unix", f"--property=ReadWritePaths={view}",
+            "/usr/bin/Xvnc", f":{number}", "-auth", "/tmp/.X11-unix/Xauthority", "-geometry", SCREEN,
+            "-depth", "24", "-nolisten", "tcp", "-noreset", "-extension", "MIT-SHM",
+            "-rfbport=-1", f"-rfbunixpath={view}/rfb", "-rfbunixmode=0600", "-SecurityTypes=None",
+            "-AlwaysShared=1", *NO_CLIPBOARD_SERVER, "-desktop", title)
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
-        if socket.exists() and stat.S_ISSOCK(socket.lstat().st_mode):
+        if all(p.exists() and stat.S_ISSOCK(p.lstat().st_mode) for p in (directory / f"X{number}", view / "rfb")):
             return directory, number
         time.sleep(0.1)
     stop_display(sandbox)
-    raise DesktopError("desktop window did not start (is WSLg available?)")
+    raise DesktopError("desktop display did not start")
+
+
+def open_window(sandbox, slot):
+    """Shows the display in a Windows window (no-op while one is open)."""
+    if window_open(sandbox):
+        return
+    view, uid = VIEW_ROOT / sandbox, display_uid(slot)
+    # WSLg can disappear (a remote session disconnecting restarts it); the
+    # viewer exits with an error then and retries until it can connect again.
+    # Closing the window exits cleanly and is not retried.
+    checked("/usr/bin/systemd-run", "--quiet", "--collect", "--unit=" + view_unit(sandbox),
+            f"--uid={uid}", f"--gid={uid}", *CONFINED,
+            f"--property=BindsTo={display_unit(sandbox)}.service", f"--property=After={display_unit(sandbox)}.service",
+            "--property=Restart=on-failure", "--property=RestartSec=3", "--property=StartLimitIntervalSec=0",
+            f"--property=BindReadOnlyPaths={WSLG_X11}:/tmp/.X11-unix", f"--property=ReadWritePaths={view}",
+            f"--setenv=HOME={view}", "--setenv=DISPLAY=:0", "--setenv=WAYLAND_DISPLAY=",
+            "/usr/bin/vncviewer", "-SecurityTypes=None", "-Shared=1", "-RemoteResize=1", "-MenuKey=None",
+            "-ReconnectOnError=0", "-AlertOnFatalError=0", *NO_CLIPBOARD_VIEWER, "-geometry", SCREEN,
+            str(view / "rfb"))
 
 
 def stop_display(sandbox):
-    execute("/usr/bin/systemctl", "stop", display_unit(sandbox) + ".service", timeout=15)
-    shutil.rmtree(DISPLAY_ROOT / sandbox, ignore_errors=True)
+    execute("/usr/bin/systemctl", "stop", view_unit(sandbox) + ".service", display_unit(sandbox) + ".service",
+            timeout=15)
+    for root in (DISPLAY_ROOT, VIEW_ROOT):
+        shutil.rmtree(root / sandbox, ignore_errors=True)
+
+
+def unit_active(unit):
+    return execute("/usr/bin/systemctl", "is-active", "--quiet", unit + ".service").returncode == 0
 
 
 def display_running(sandbox):
-    return execute("/usr/bin/systemctl", "is-active", "--quiet", display_unit(sandbox) + ".service").returncode == 0
+    return unit_active(display_unit(sandbox))
+
+
+def window_open(sandbox):
+    # "activating" (waiting to retry after losing WSLg) counts as open: the
+    # window comes back by itself.
+    state = execute("/usr/bin/systemctl", "is-active", view_unit(sandbox) + ".service").stdout.strip()
+    return state in ("active", "activating", "reloading")
 
 
 def prepare_home(directory, sandbox, slot):
@@ -296,7 +383,7 @@ def configure(sandbox, node, stream):
 
 
 def stop(sandbox, info):
-    # Network first, then the desktop, then its window; report the first failure.
+    # Network first, then the desktop, then its display and window; report the first failure.
     try:
         disconnect(sandbox)
     finally:
@@ -308,13 +395,15 @@ def stop(sandbox, info):
 
 
 def open_desktop(user, sandbox, node, title, directory, info):
-    if info and info["State"]["Running"] and display_running(sandbox):
-        return info  # already open: the client just brings the window forward
     slot = slot_of(directory)
+    if info and info["State"]["Running"] and display_running(sandbox):
+        open_window(sandbox, slot)   # already running: reopen its window if it was closed
+        return info
     disconnect(sandbox)
     if info:
         remove(info)
     display, number = start_display(sandbox, slot, title)
+    open_window(sandbox, slot)
     create(user, sandbox, node, directory, slot, display, number)
     checked(*PODMAN, "start", container_name(sandbox))
     info = inspect(sandbox, user)
@@ -343,6 +432,7 @@ def describe(user, sandbox, info):
     return {"user_id": user, "sandbox_id": sandbox,
             "node_id": info["Config"]["Labels"][LABEL + "node"] if info else None,
             "desktop": "running" if running and display_running(sandbox) else "stopped",
+            "window": "open" if running and window_open(sandbox) else "closed",
             "network": network_state(sandbox) if running else "offline"}
 
 
@@ -359,7 +449,7 @@ def run(op, user, sandbox, node=None, title=None, policy_stream=None):
                 raise DesktopError("stop the desktop before configuring a node")
             configure(sandbox, node, policy_stream if policy_stream is not None else sys.stdin.buffer)
             return {"user_id": user, "sandbox_id": sandbox, "node_id": node, "desktop": "stopped",
-                    "network": "offline", "configured": True}
+                    "window": "closed", "network": "offline", "configured": True}
         if op == "start":
             if info and info["State"]["Running"] and info["Config"]["Labels"][LABEL + "node"] != node:
                 raise DesktopError("stop the desktop before changing its bound node")

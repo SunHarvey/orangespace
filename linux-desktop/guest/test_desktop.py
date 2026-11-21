@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import io
 from pathlib import Path
+import socket
 import struct
 import subprocess
 import tempfile
@@ -106,11 +107,13 @@ class DesktopTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 desktop.window_title(bad)
 
-    def test_start_orders_window_container_gateway_launch_and_stays_offline_without_node(self):
+    def test_start_orders_display_window_container_gateway_launch_and_stays_offline_without_node(self):
         self.patch("inspect", side_effect=[None, self.info])
         self.patch("display_running", return_value=True)
+        self.patch("window_open", return_value=True)
         events = []
-        self.patch("start_display", side_effect=lambda *a: events.append("window") or (self.root, 100))
+        self.patch("start_display", side_effect=lambda *a: events.append("display") or (self.root, 100))
+        self.patch("open_window", side_effect=lambda *a: events.append("window"))
         self.patch("create", side_effect=lambda *a: events.append("create"))
         self.patch("checked", side_effect=lambda *a, **k: events.append(a[1] if a[0] == desktop.PODMAN[0] else a[0]))
         self.patch("execute", return_value=subprocess.CompletedProcess([], 0))
@@ -119,18 +122,88 @@ class DesktopTests(unittest.TestCase):
             return operation in ("down",)   # no usable node: up fails
         self.patch("gateway", side_effect=network)
         result = desktop.run("start", self.user, self.sandbox, self.node, "OrangeSpace A")
-        self.assertEqual(events, ["gateway-down", "window", "create", "start", "gateway-up", "gateway-down",
-                                  "exec", "gateway-status"])
-        self.assertEqual((result["desktop"], result["network"]), ("running", "offline"))
+        self.assertEqual(events, ["gateway-down", "display", "window", "create", "start", "gateway-up",
+                                  "gateway-down", "exec", "gateway-status"])
+        self.assertEqual((result["desktop"], result["window"], result["network"]), ("running", "open", "offline"))
 
-    def test_reopening_a_running_desktop_changes_nothing(self):
+    def test_reopening_a_running_desktop_only_reopens_its_window(self):
         self.patch("inspect", return_value=self.info)
         self.patch("display_running", return_value=True)
-        start_display = self.patch("start_display")
+        self.patch("window_open", return_value=False)
+        start_display, create = self.patch("start_display"), self.patch("create")
+        open_window = self.patch("open_window")
         self.patch("gateway", return_value=True)
         self.patch("execute", return_value=subprocess.CompletedProcess([], 0))
         desktop.run("start", self.user, self.sandbox, self.node, "A")
         start_display.assert_not_called()
+        create.assert_not_called()
+        open_window.assert_called_once_with(self.sandbox, desktop.slot_of(self.instance()))
+
+    def test_display_account_is_created_once_and_never_borrowed(self):
+        checked = self.patch("checked")
+        getpwuid = self.patch("pwd").getpwuid
+        getpwuid.side_effect = KeyError
+        self.assertEqual(desktop.display_account(5), desktop.DISPLAY_UID_BASE + 5)
+        self.assertEqual([c.args[0] for c in checked.call_args_list], ["/usr/sbin/groupadd", "/usr/sbin/useradd"])
+        checked.reset_mock()
+        getpwuid.side_effect = None
+        getpwuid.return_value = type("Entry", (), {"pw_name": "osdisp5", "pw_gid": desktop.DISPLAY_UID_BASE + 5})
+        self.assertEqual(desktop.display_account(5), desktop.DISPLAY_UID_BASE + 5)
+        checked.assert_not_called()
+        getpwuid.return_value = type("Entry", (), {"pw_name": "someone", "pw_gid": 100})
+        with self.assertRaisesRegex(desktop.DesktopError, "conflicts"):
+            desktop.display_account(5)
+
+    def test_window_already_open_is_not_started_twice(self):
+        self.patch("window_open", return_value=True)
+        checked = self.patch("checked")
+        desktop.open_window(self.sandbox, 2)
+        checked.assert_not_called()
+
+    def test_display_runs_confined_without_wslg_or_clipboard_and_viewer_socket_stays_private(self):
+        short = tempfile.TemporaryDirectory(dir="/tmp")   # Unix socket paths are length-limited
+        self.addCleanup(short.cleanup)
+        root = Path(short.name)
+        self.patch("DISPLAY_ROOT", root / "display")
+        self.patch("VIEW_ROOT", root / "view")
+        self.patch("execute", return_value=subprocess.CompletedProcess([], 3, stdout="inactive"))
+        chown_patch = patch.object(desktop.os, "chown")
+        chown = chown_patch.start()
+        self.addCleanup(chown_patch.stop)
+        calls = []
+        def fake_systemd_run(*args, **kwargs):
+            calls.append(args)
+            if len(calls) == 1:   # the X server creates its two sockets
+                number = next(a for a in args if a.startswith(":"))
+                for path in (root / "display" / self.sandbox / ("X" + number[1:]), root / "view" / self.sandbox / "rfb"):
+                    sock = socket.socket(socket.AF_UNIX)
+                    sock.bind(str(path))
+                    self.addCleanup(sock.close)
+        self.patch("checked", side_effect=fake_systemd_run)
+        self.patch("display_account", side_effect=desktop.display_uid)
+        directory, number = desktop.start_display(self.sandbox, 4, "A")
+        desktop.open_window(self.sandbox, 4)
+        server, viewer = calls
+        uid = desktop.display_uid(4)
+        self.assertEqual((directory, number), (root / "display" / self.sandbox, desktop.DISPLAY_BASE + 4))
+        self.assertTrue(all(c.args[1] == uid for c in chown.call_args_list))
+        self.assertFalse(any(uid in range(desktop.UID_BASE + s * desktop.UID_BLOCK,
+                                          desktop.UID_BASE + (s + 1) * desktop.UID_BLOCK)
+                             for s in range(desktop.MAX_SLOTS)))
+        for unit in (server, viewer):
+            for flag in (f"--uid={uid}", "--property=NoNewPrivileges=yes", "--property=PrivateNetwork=yes",
+                         "--property=ProtectSystem=strict", "-SendPrimary=0", "-SetPrimary=0"):
+                self.assertIn(flag, unit)
+        for flag in ("--property=InaccessiblePaths=/mnt", "-AcceptCutText=0", "-SendCutText=0", "-rfbport=-1",
+                     "-nolisten", "-rfbunixmode=0600"):
+            self.assertIn(flag, server)
+        for flag in ("-AcceptClipboard=0", "-SendClipboard=0", "-MenuKey=None", "--property=Restart=on-failure"):
+            self.assertIn(flag, viewer)
+        # The viewer socket lives outside the directory the container mounts.
+        rfb = root / "view" / self.sandbox / "rfb"
+        self.assertIn(str(rfb), viewer)
+        self.assertNotIn(directory, rfb.parents)
+        self.assertEqual((root / "view" / self.sandbox).stat().st_mode & 0o777, 0o700)
 
     def test_mismatched_node_preserves_live_instance(self):
         self.patch("inspect", return_value=self.info)

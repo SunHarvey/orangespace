@@ -27,6 +27,7 @@ DESKTOP_PEER = "192.168.254.1"
 DESKTOP_IP = "192.168.254.2"
 WINDOW = 15
 CHECK_INTERVAL = 3
+TUN_START_SECONDS = 15
 BLOCKED = ("0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
            "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4")
 
@@ -435,15 +436,18 @@ class Gateway:
             "--property=Type=exec", "--property=Restart=no",
             "--property=StandardOutput=null", "--property=StandardError=null",
             "--", *command)
-        for _ in range(60):
+        # Bounded by time, not by iterations: on a loaded machine each check
+        # itself can take a large share of the budget.
+        deadline = time.monotonic() + TUN_START_SECONDS
+        while True:
             links = json.loads(run(*gw, "-j", "link", "show"))
             if any(link["ifname"] == "ostun0" for link in links):
                 break
             if service_property(self.unit, "ActiveState") != "active":
                 raise GatewayError("tunnel process stopped during startup")
+            if time.monotonic() >= deadline:
+                raise GatewayError("tunnel interface did not start")
             time.sleep(0.05)
-        else:
-            raise GatewayError("tunnel interface did not start")
         # If removal of the TUN deletes its route, desktop traffic must not fall
         # through to the gateway's own node endpoint route in the main table.
         run(*gw, "route", "add", "unreachable", "default", "metric", "32767", "table", "100")
