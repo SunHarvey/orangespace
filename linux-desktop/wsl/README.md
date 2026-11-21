@@ -8,6 +8,8 @@
 | `wsl.conf` | 发行版的 `/etc/wsl.conf`：开启 systemd；关闭 Windows 磁盘自动挂载与互操作；默认用户 `desk` |
 | `agent.py` | 客体代理：由客户端以 `wsl.exe -d OrangeSpace -u root -- python3 /opt/orangespace/wsl/agent.py` 启动，经标准输入/输出收发帧 |
 | `test_agent.py` | 以子进程方式运行代理、按真实管道收发帧的行为测试 |
+| `system` | 安装与升级用的系统工具（root，由客户端经 `wsl.exe -u root` 调用）：`info` 报告版本号、桌面镜像和沙盒数；`load-image SHA256` 从标准输入载入桌面镜像归档并核对摘要；`export-data` / `import-data` 以 tar 流导出、放回沙盒数据（`/var/lib/orangespace/desktop`）。导出前要求没有桌面和网关在运行；放回只接受空目标和 `desktop/` 下的普通成员 |
+| `test_system.py` | `system` 的行为测试（需 root，用假的 podman） |
 
 Windows 侧对应 `apps/windows-client/include/orangespace/wsl_runtime.hpp`（导入、启动、请求、关闭）和 `wsl_channel.hpp`（帧编解码），开发与验收工具是 `orangespace-wsl.exe`。
 
@@ -25,8 +27,10 @@ Windows 侧对应 `apps/windows-client/include/orangespace/wsl_runtime.hpp`（�
 在 Debian（或某个 Debian WSL 发行版）里以 root 运行，需要 mmdebstrap、curl、ca-certificates：
 
 ```sh
-sudo linux-desktop/wsl/build-rootfs /srv/out/orangespace-rootfs.tar.gz
+sudo ORANGESPACE_REVISION=0.1.0+<提交> linux-desktop/wsl/build-rootfs /srv/out/orangespace-rootfs.tar.gz
 ```
+
+`ORANGESPACE_REVISION` 写进 `/opt/orangespace/REVISION`，客户端按它判断是否升级，每次发布必须不同。打包见 [deploy/windows](../../deploy/windows/README.md)。
 
 sing-box 不在 Debian 仓库中，脚本按固定版本下载官方发布包并校验 SHA-256。镜像里不含任何用户数据或凭据。
 

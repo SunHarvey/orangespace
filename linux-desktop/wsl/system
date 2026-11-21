@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""Install and upgrade support for the OrangeSpace distribution.
+
+Run as root by the Windows client through wsl.exe, never from a sandbox:
+
+    system info                         one JSON line: {"revision", "image", "sandboxes"}
+    system load-image SHA256 < archive  the desktop image (OCI archive): checked against
+                                        SHA256, loaded, and left as the only desktop image
+    system export-data > tar            all sandbox desktop data (HOMEs, owners, slots)
+    system import-data < tar            restores it into an empty data directory
+
+Before export the client stops the distribution (wsl --terminate), so no
+desktop is running; export refuses otherwise. The data stays on this computer:
+the client keeps the tar in a private folder of the Windows user only until the
+upgraded distribution has it back.
+"""
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+ROOT = Path("/var/lib/orangespace")
+DATA = "desktop"                                   # ROOT/DATA is guest/desktop's ROOT
+REVISION = Path("/opt/orangespace/REVISION")
+IMAGE = "localhost/orangespace/desktop:current"    # guest/desktop runs this tag
+PODMAN = ("/usr/bin/podman",)
+SPOOL = Path("/var/tmp")
+MAX_IMAGE_BYTES = 4 << 30
+CHUNK = 1 << 20
+
+
+class SystemError_(Exception):
+    pass
+
+
+def podman(*args, **kwargs):
+    return subprocess.run([*PODMAN, *args], capture_output=True, text=True, **kwargs)
+
+
+def image_id():
+    result = podman("image", "inspect", "--format", "{{.Id}}", IMAGE)
+    return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
+
+
+def info():
+    try:
+        revision = REVISION.read_text().splitlines()[0].strip()
+    except (OSError, IndexError):
+        revision = ""
+    instances = ROOT / DATA / "instances"
+    count = sum(1 for p in instances.iterdir() if p.is_dir()) if instances.is_dir() else 0
+    return {"revision": revision, "image": image_id(), "sandboxes": count}
+
+
+def load_image(expected, stream):
+    expected = expected.lower()
+    if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+        raise SystemError_("invalid SHA-256")
+    digest, size = hashlib.sha256(), 0
+    fd, name = tempfile.mkstemp(prefix="orangespace-image-", suffix=".tar", dir=SPOOL)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            while chunk := stream.read(CHUNK):
+                size += len(chunk)
+                if size > MAX_IMAGE_BYTES:
+                    raise SystemError_("image archive too large")
+                digest.update(chunk)
+                out.write(chunk)
+        if digest.hexdigest() != expected:
+            raise SystemError_("image archive does not match its SHA-256")
+        result = podman("load", "--quiet", "--input", name)
+        if result.returncode:
+            raise SystemError_("podman could not load the image archive")
+    finally:
+        os.unlink(name)
+    if not image_id():
+        raise SystemError_(f"the archive does not contain {IMAGE}")
+    podman("image", "prune", "--force")   # the previous image, now untagged
+    return info()
+
+
+def desktops_running():
+    result = podman("ps", "--quiet", "--filter", "label=io.orangespace.desktop.user")
+    if result.returncode:
+        raise SystemError_("podman is not answering")
+    if result.stdout.strip():
+        return True
+    units = subprocess.run(["systemctl", "list-units", "--no-legend", "--plain", "--state=active",
+                            "osview-*", "osdisp-*", "orangespace-gw-*"], capture_output=True, text=True)
+    return bool(units.stdout.strip())
+
+
+def export_data(stream):
+    if desktops_running():
+        raise SystemError_("stop every desktop before exporting its data")
+    with tarfile.open(fileobj=stream, mode="w|", format=tarfile.PAX_FORMAT) as archive:
+        if (ROOT / DATA).is_dir():
+            archive.add(ROOT / DATA, arcname=DATA)
+
+
+def member_filter(member, path):
+    name = member.name
+    if name != DATA and not name.startswith(DATA + "/"):
+        raise SystemError_("unexpected entry in the data archive")
+    # Keeps owners and permissions (each sandbox's files belong to its own
+    # UID); refuses absolute paths, escapes and links pointing outside.
+    return tarfile.tar_filter(member, path)
+
+
+def import_data(stream):
+    target = ROOT / DATA
+    if target.exists() and any(target.iterdir()):
+        raise SystemError_("the data directory is not empty")
+    ROOT.mkdir(mode=0o755, parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".import-", dir=ROOT))
+    try:
+        with tarfile.open(fileobj=stream, mode="r|") as archive:
+            archive.extractall(staging, filter=member_filter, numeric_owner=True)
+        restored = staging / DATA
+        if not restored.is_dir():
+            restored.mkdir(mode=0o755)
+        if target.exists():
+            target.rmdir()
+        restored.rename(target)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return info()
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if os.geteuid() != 0:
+        print("run as root", file=sys.stderr)
+        return 2
+    os.umask(0o077)
+    try:
+        if argv == ["info"]:
+            result = info()
+        elif len(argv) == 2 and argv[0] == "load-image":
+            result = load_image(argv[1], sys.stdin.buffer)
+        elif argv == ["export-data"]:
+            export_data(sys.stdout.buffer)
+            return 0
+        elif argv == ["import-data"]:
+            result = import_data(sys.stdin.buffer)
+        else:
+            print(__doc__, file=sys.stderr)
+            return 2
+    except (SystemError_, OSError, tarfile.TarError) as exc:
+        print(f"system: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

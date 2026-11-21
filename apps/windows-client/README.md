@@ -2,6 +2,16 @@
 
 `OrangeSpace.exe` 是用户使用的窗口：登录中心、管理本机沙盒列表、打开沙盒桌面并显示每个沙盒的状态。每个沙盒是 WSL2 发行版 `OrangeSpace` 里的一个 Linux 桌面，以自己的窗口显示，全部流量只经绑定节点出网（见 [docs/architecture.md](../../docs/architecture.md)）。
 
+## 安装与首次运行
+
+正式安装由安装包完成（见 [deploy/windows](../../deploy/windows/README.md)）：程序装在 `Program Files\OrangeSpace`，旁边是 `trust`（中心与节点钉扎）和 `system`（发行版根文件系统、桌面镜像和 `release.json`）。WSL 发行版属于单个 Windows 账号，所以每个账号第一次打开时，客户端在登录界面之前按 `release.json` 准备自己的发行版（`system_setup`）：
+
+- 没有发行版就导入并载入桌面镜像；
+- 版本号不同就升级：先把沙盒数据导出到 `%LOCALAPPDATA%\OrangeSpace\upgrade` 并记下摘要，再替换发行版、放回数据、核对后删除；
+- 升级中断后，下次启动从保存的数据继续。
+
+过程写在 `%LOCALAPPDATA%\OrangeSpace\setup.log`。没有 `system` 文件夹的开发构建跳过这一步。客户端单实例运行，再次启动只会把已有窗口带到前面。
+
 ## 窗口
 
 - **登录**：用管理员保护的 `trust\platform.json`（中心）登录，节点证书固定在 `trust\catalog.json`。两份文件放在程序旁的 `trust` 目录（或用 `--trust <目录>` 指定），普通用户可写的文件会被拒绝。没有本机直连回退。
@@ -16,6 +26,7 @@
   - 复制经当前 Windows 用户的私有中转目录 `users\<中心用户 UUID>\transfer`，完成或失败后即删除；可以取消。沙盒一侧以该沙盒自己的 UID 读写，需要沙盒至少打开过一次（不必正在运行）。
   - 节点要授予该账号文件读写权限，按钮才可用。删除沙盒、退出登录或关闭主窗口时，先取消进行中的复制并关闭文件窗口。
 - **删除**：确认后删除该沙盒在本机的桌面数据；节点上的个人文件不受影响。
+- **删除本机全部数据…**（登录界面）：注销当前 Windows 账号的发行版，删除 `%LOCALAPPDATA%` 下的客户端文件夹和保存的登录信息，然后关闭；节点上的个人文件不受影响。卸载时选择删除数据，执行的是同一操作（`OrangeSpace.exe --remove-all-data`）。
 - **退出登录 / 关闭窗口**：先停止所有沙盒，再退出。客户端被强行结束时，代理随控制通道关闭停掉所有桌面，内核许可在租约剩余寿命内自行过期。
 
 状态列只显示观察到的情况：
@@ -51,4 +62,6 @@ cmake --build build/windows --config Release
 ctest --test-dir build/windows -C Release --output-on-failure
 ```
 
-`sandbox-model` 测试本机沙盒列表的解析与校验和状态文字；`wsl-channel` 测试代理帧协议。窗口、续租与出口要在 Windows 实机配合真实节点验收，见 [docs/roadmap.md](../../docs/roadmap.md)。
+C/C++ 运行库静态链接（CMake `CMAKE_MSVC_RUNTIME_LIBRARY`，Rust 由 `.cargo/config.toml` 的 `+crt-static`），程序不依赖 VC++ 运行库。安装包由 `scripts/build-release.ps1` 构建。
+
+`sandbox-model` 测试本机沙盒列表的解析与校验和状态文字；`system-setup` 测试 `release.json` 与发行版信息的解析以及安装/升级/续做的判断；`wsl-channel` 测试代理帧协议。窗口、续租与出口要在 Windows 实机配合真实节点验收，见 [docs/roadmap.md](../../docs/roadmap.md)。

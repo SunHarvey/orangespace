@@ -17,6 +17,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace orangespace::wsl {
 
@@ -37,6 +38,11 @@ void import_distribution(const std::wstring& rootfs_tar_gz, const std::wstring& 
 void terminate_distribution();
 // wsl --unregister OrangeSpace: deletes the distribution and ALL its data.
 void unregister_distribution();
+// Runs a fixed command in the distribution as root, with no window:
+// `wsl.exe -d OrangeSpace -u root --cd / -- <command...>`. Its stdin, stdout
+// and stderr are the given handles (null: the NUL device); only these three
+// are inherited. Returns the exit code; throws if it cannot start or times out.
+DWORD run_as_root(const std::vector<std::wstring>& command, HANDLE in, HANDLE out, HANDLE err, DWORD timeout_ms);
 
 // The long-lived agent child: `wsl.exe -d OrangeSpace -u root -- python3
 // /opt/orangespace/wsl/agent.py`, with private stdin/stdout pipes.

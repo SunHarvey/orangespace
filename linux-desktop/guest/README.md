@@ -66,7 +66,12 @@ desktop files-get  USER_UUID SANDBOX_UUID NAME       > {"size":N} 一行 + 文�
   - `window` 取值 `open` 或 `closed`；
   - `network` 取值 `offline`、`gateway-ready` 或 `online`，`online` 要求租约里带 HTTPS 探测。
 
-桌面镜像在发行版里用 `build-image` 构建（`podman build`）。
+桌面镜像在发行版里用 `build-image` 构建（`podman build`，标签 `localhost/orangespace/desktop:current`，基础镜像 `debian:trixie-slim`）。发布时用 `build-image --archive desktop-image.tar` 另外写出：
+- OCI 归档及其 SHA-256；
+- 基础镜像摘要（`.base-image.txt`）；
+- 镜像内完整软件包清单（`.packages.tsv`）。
+
+安装后由客户端经 `wsl/system load-image` 载入。
 
 ## 验证
 

@@ -1,0 +1,5 @@
+# The Windows client links orangespace-https statically and ships without the
+# Visual C++ runtime package, so the Rust side uses the static C runtime too
+# (matching CMAKE_MSVC_RUNTIME_LIBRARY in the top-level CMakeLists.txt).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

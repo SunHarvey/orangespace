@@ -1,7 +1,29 @@
 #!/bin/sh
-# Builds the desktop image inside the OrangeSpace distribution (development).
-# Releases ship the image as an OCI archive loaded on first start (roadmap L5).
+# Builds the desktop image.
+#
+#   build-image                  development: build inside the OrangeSpace distribution
+#   build-image --archive OUT    release: also write OUT (OCI archive for `wsl/system
+#                                load-image`), OUT.packages.tsv (every Debian package in
+#                                the image with its source package and version),
+#                                OUT.base-image.txt (the base image digest) and OUT.sha256
+#
+# Needs podman and network access to the base image registry and the Debian
+# archive. OUT must not exist yet.
 set -eu
 cd "$(dirname "$0")"
 umask 022
-podman build --pull=newer --tag localhost/orangespace/desktop:dev .
+TAG=localhost/orangespace/desktop:current
+BASE=docker.io/library/debian:trixie-slim
+OUT=
+if [ "${1:-}" = "--archive" ]; then
+  OUT=${2:?usage: build-image [--archive OUT.tar]}
+  [ ! -e "$OUT" ] || { echo "$OUT already exists" >&2; exit 2; }
+fi
+podman build --pull=newer --tag "$TAG" .
+[ -n "$OUT" ] || exit 0
+podman save --format oci-archive --output "$OUT" "$TAG"
+podman image inspect --format '{{index .RepoDigests 0}}' "$BASE" > "$OUT.base-image.txt"
+podman run --rm --network=none --user 0 --entrypoint dpkg-query "$TAG" \
+  -W -f='${Package}\t${Version}\t${source:Package}\t${source:Version}\n' > "$OUT.packages.tsv"
+( cd "$(dirname "$OUT")" && sha256sum "$(basename "$OUT")" > "$(basename "$OUT").sha256" )
+echo "built $OUT ($(wc -l < "$OUT.packages.tsv") packages, base $(cat "$OUT.base-image.txt"))"

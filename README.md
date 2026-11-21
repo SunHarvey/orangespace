@@ -10,7 +10,7 @@ Windows 上同时运行多个沙盒，每个沙盒是一个窗口里的完整 Li
 
 沙盒运行在 Windows 自带的 WSL2 中、本项目自己的 Debian 发行版里：每个沙盒一个容器、一个私有显示窗口（WSLg）和一个网关网络命名空间，网关经 TUIC 连到绑定节点，出口许可随节点租约续期、到期由内核自动断开。详见 [架构说明](docs/architecture.md)、[路线图](docs/roadmap.md) 与 [选型方案](docs/proposal-wsl-linux-desktop.md)。
 
-**2026-11-20 起改为 WSL2 Linux 桌面路线。** L1–L3（运行底座、沙盒桌面、全流量经节点）已在测试虚拟机配合真实节点验收，L4（产品功能）进行中。原生 Windows CEF/WFP 方案曾在测试机跑通，但无法让 UDP 经节点、也没有完整桌面，已于 2026-11-21 从主线删除（代码在 git 历史与 `p0-consolidation` 分支，记录在 `docs/archive/`）。
+**2026-11-20 起改为 WSL2 Linux 桌面路线。** L1–L3（运行底座、沙盒桌面、全流量经节点）已在测试虚拟机配合真实节点验收；L4（产品功能）除“记住登录”外已完成；L5 的 Inno Setup 安装包已在测试虚拟机上完成安装、升级、卸载验收（见 [deploy/windows](deploy/windows/README.md)）。原生 Windows CEF/WFP 方案曾在测试机跑通，但无法让 UDP 经节点、也没有完整桌面，已于 2026-11-21 从主线删除（代码在 git 历史与 `p0-consolidation` 分支，记录在 `docs/archive/`）。
 
 | 部分 | 当前实现 |
 |---|---|
@@ -19,7 +19,8 @@ Windows 上同时运行多个沙盒，每个沙盒是一个窗口里的完整 Li
 | 应用私有 HTTPS | Rust `crates/orangespace-https`（rustls，只信任客户端钉住的 CA），客户端经 C ABI 调用 |
 | Linux 节点与中心 | Python/FastAPI、SQLAlchemy/Alembic、MySQL、中心身份和节点授权、个人文件 API；实际 RDS 资料待提供 |
 | Linux 桌面沙盒 | WSL2 发行版 `OrangeSpace`：每沙盒一个加固容器、私有显示与可重连窗口、网关命名空间与 TUIC 租约隧道（`linux-desktop/`）。见路线图 L1–L3 |
-| 节点文件 | 节点个人文件 API 已完成；客户端与沙盒“下载”目录之间的传输属 L4，进行中 |
+| 节点文件 | 节点个人文件 API；客户端文件窗口在节点与沙盒“下载”之间复制 |
+| 安装与升级 | Inno Setup 安装包（`deploy/windows`）；每个 Windows 账号的发行版由客户端首次运行时导入，升级时保留沙盒数据 |
 
 客户端身份来自中心认证回复，授权节点来自中心 API。Web 管理后台与 Windows 本机沙盒管理器是独立入口，Linux 不运行浏览器。干净源码三包构建见 [开发包构建](deploy/packages/README.md)，后续阶段见 [路线图](docs/roadmap.md)。
 

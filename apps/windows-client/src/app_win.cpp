@@ -23,6 +23,7 @@
 #include "orangespace/sandbox_engine.hpp"
 #include "orangespace/sandbox_status.hpp"
 #include "orangespace/sandbox_store.hpp"
+#include "orangespace/system_setup.hpp"
 #include "orangespace/wsl_runtime.hpp"
 
 #include <bcrypt.h>
@@ -47,6 +48,7 @@ namespace ps = orangespace::platform_session;
 namespace ns = orangespace::node_session;
 namespace nd = orangespace::node_session::detail;
 namespace sb = orangespace::sandbox;
+namespace ss = orangespace::system_setup;
 namespace wsl = orangespace::wsl;
 namespace json = orangespace::json;
 namespace fs = std::filesystem;
@@ -55,9 +57,11 @@ constexpr UINT kAgentReady = WM_APP + 1;
 constexpr UINT kSignedIn = WM_APP + 2;
 constexpr UINT kErased = WM_APP + 3;
 constexpr UINT kStopped = WM_APP + 4;  // engine shut down (sign-out or exit)
+constexpr UINT kSetupProgress = WM_APP + 5;  // lparam: new std::wstring
+constexpr UINT kRemoved = WM_APP + 6;        // lparam: new std::wstring (empty: done)
 constexpr UINT_PTR kTick = 1;
 
-enum Id : int { Username = 100, Password, SignIn, List, Name, Node, Create, Open, Stop, Rebind, Delete, SignOut, Files };
+enum Id : int { Username = 100, Password, SignIn, List, Name, Node, Create, Open, Stop, Rebind, Delete, SignOut, Files, RemoveData };
 
 std::wstring widen(std::string_view s) {
   const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
@@ -177,6 +181,7 @@ class App {
     SendMessageW(username_, EM_LIMITTEXT, 64, 0);
     SendMessageW(password_, EM_LIMITTEXT, 1024, 0);
     sign_in_ = control(L"BUTTON", L"登录", WS_TABSTOP | BS_DEFPUSHBUTTON, SignIn);
+    remove_data_ = control(L"BUTTON", L"删除本机全部数据…", WS_TABSTOP, RemoveData);
 
     identity_ = control(L"STATIC", L"", SS_LEFT);
     sign_out_ = control(L"BUTTON", L"退出登录", WS_TABSTOP, SignOut);
@@ -228,6 +233,7 @@ class App {
       MoveWindow(password_, x, y + px(146), px(360), row, TRUE);
       MoveWindow(sign_in_, x, y + px(196), px(360), px(34), TRUE);
       MoveWindow(notice_, x, y + px(244), px(360), px(60), TRUE);
+      MoveWindow(remove_data_, w - m - px(160), h - m - px(30), px(160), px(30), TRUE);
       return;
     }
     MoveWindow(identity_, m, m, w - 2 * m - px(110), px(24), TRUE);
@@ -264,6 +270,7 @@ class App {
         case Delete: delete_selected(); break;
         case Files: open_files(); break;
         case SignOut: sign_out(); break;
+        case RemoveData: remove_all_data(); break;
         default: break;
       }
     } catch (const std::exception& e) {
@@ -295,7 +302,51 @@ class App {
     }
     agent_ = std::move(result->agent);
     if (signed_in()) make_engine();
-    if (notice_text_ == L"正在启动 WSL……") notice(L"");
+    if (notice_text_ == L"正在启动 WSL……" || (!setup_text_.empty() && notice_text_ == setup_text_)) notice(L"");
+  }
+
+  void setup_progress(std::wstring* raw) {
+    std::unique_ptr<std::wstring> text(raw);
+    setup_text_ = *text;
+    notice(setup_text_);
+  }
+
+  // Sign-in screen only: no sandbox is running, only the agent.
+  void remove_all_data() {
+    if (signed_in() || removing_) return;
+    if (agent_thread_.joinable()) {
+      notice(L"系统组件还在准备，请等它完成后再删除。");
+      return;
+    }
+    if (MessageBoxW(window_,
+                    L"将删除这台电脑上属于当前 Windows 用户的全部橙域数据：所有沙盒桌面（含其中的文件、浏览器资料和“下载”）、"
+                    L"沙盒列表、日志和保存的登录信息。节点上的个人文件不受影响。\n\n此操作不能撤销。删除后橙域会关闭。要继续吗？",
+                    L"橙域", MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2) != IDOK)
+      return;
+    removing_ = true;
+    EnableWindow(window_, FALSE);
+    notice(L"正在删除本机数据……");
+    std::shared_ptr<wsl::Agent> agent(std::move(agent_));
+    remove_thread_ = std::thread([this, agent] {
+      auto error = std::make_unique<std::wstring>();
+      try {
+        if (agent) agent->shutdown();
+        ss::remove_all_local_data();
+      } catch (const std::exception& e) {
+        *error = widen(e.what());
+      }
+      if (PostMessageW(window_, kRemoved, 0, reinterpret_cast<LPARAM>(error.get()))) error.release();
+    });
+  }
+
+  void removed(std::wstring* raw) {
+    std::unique_ptr<std::wstring> error(raw);
+    if (remove_thread_.joinable()) remove_thread_.join();
+    MessageBoxW(window_, error->empty() ? L"本机的橙域数据已删除。" : (L"删除没有全部完成：" + *error).c_str(), L"橙域",
+                MB_OK | (error->empty() ? MB_ICONINFORMATION : MB_ICONWARNING));
+    exiting_ = true;
+    KillTimer(window_, kTick);
+    DestroyWindow(window_);
   }
 
   void signed_in_result(SignInResult* raw) {
@@ -386,7 +437,7 @@ class App {
   }
 
   void destroyed() {
-    for (auto* t : {&agent_thread_, &sign_in_thread_, &stop_thread_})
+    for (auto* t : {&agent_thread_, &sign_in_thread_, &stop_thread_, &remove_thread_})
       if (t->joinable()) t->join();
     files_windows_.reset();
     guest_files_.reset();
@@ -421,7 +472,7 @@ class App {
   }
 
   void show_main(bool main) {
-    for (HWND h : {heading_, username_label_, username_, password_label_, password_, sign_in_})
+    for (HWND h : {heading_, username_label_, username_, password_label_, password_, sign_in_, remove_data_})
       ShowWindow(h, main ? SW_HIDE : SW_SHOW);
     for (HWND h : {identity_, sign_out_, list_, open_, stop_, files_, delete_, name_label_, name_, node_label_, node_, create_, rebind_})
       ShowWindow(h, main ? SW_SHOW : SW_HIDE);
@@ -449,7 +500,16 @@ class App {
     agent_thread_ = std::thread([this] {
       auto result = std::make_unique<AgentResult>();
       try {
+        // An installed release first brings this user's distribution to it
+        // (first start: import; after an upgrade: replace, keeping the data).
+        if (auto setup = ss::SystemSetup::for_this_install())
+          setup->run([this](const std::wstring& line) {
+            auto text = std::make_unique<std::wstring>(line);
+            if (PostMessageW(window_, kSetupProgress, 0, reinterpret_cast<LPARAM>(text.get()))) text.release();
+          });
         result->agent = std::make_unique<wsl::Agent>();
+      } catch (const ss::SetupError& e) {
+        result->error = L"橙域系统组件没有就绪：" + widen(e.what());
       } catch (const std::exception& e) {
         const std::string what = e.what();
         result->error = what.find("not installed") != std::string::npos
@@ -749,10 +809,12 @@ class App {
   HWND window_{};
   UINT dpi_{96};
   HFONT font_{}, title_font_{};
-  HWND heading_{}, username_label_{}, username_{}, password_label_{}, password_{}, sign_in_{};
+  HWND heading_{}, username_label_{}, username_{}, password_label_{}, password_{}, sign_in_{}, remove_data_{};
   HWND identity_{}, sign_out_{}, list_{}, open_{}, stop_{}, files_{}, delete_{}, name_label_{}, name_{}, node_label_{}, node_{},
       create_{}, rebind_{}, notice_{};
-  std::wstring notice_text_, agent_error_;
+  std::wstring notice_text_, agent_error_, setup_text_;
+  std::thread remove_thread_;
+  bool removing_{false};
   std::shared_ptr<const ps::PlatformConfig> platform_;
   std::shared_ptr<const ns::TrustedCatalog> catalog_;
   std::string probe_;
@@ -815,6 +877,12 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM wparam, LPAR
       case kStopped:
         app->stopped();
         return 0;
+      case kSetupProgress:
+        app->setup_progress(reinterpret_cast<std::wstring*>(lparam));
+        return 0;
+      case kRemoved:
+        app->removed(reinterpret_cast<std::wstring*>(lparam));
+        return 0;
       case WM_CTLCOLORSTATIC:
         SetBkMode(reinterpret_cast<HDC>(wparam), TRANSPARENT);
         return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
@@ -842,14 +910,40 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
   GetModuleFileNameW(nullptr, self.data(), static_cast<DWORD>(self.size()));
   fs::path trust = fs::path(self.data()).parent_path() / L"trust";
   std::string username;
-  bool password_stdin = false;
+  bool password_stdin = false, remove_all = false;
   for (int i = 1; argv && i < argc; ++i) {
     const std::wstring_view arg = argv[i];
-    if (arg == L"--trust" && i + 1 < argc) trust = argv[++i];
+    if (arg == L"--remove-all-data") remove_all = true;
+    else if (arg == L"--trust" && i + 1 < argc) trust = argv[++i];
     else if (arg == L"--username" && i + 1 < argc) username = narrow(argv[++i]);
     else if (arg == L"--password-stdin") password_stdin = true;
   }
   if (argv) LocalFree(argv);
+
+  // One client per Windows session: two would fight over the distribution and
+  // its agent. The installer and uninstaller look for these names
+  // (AppMutex) to ask for the client to be closed first.
+  HANDLE session_mutex = CreateMutexW(nullptr, FALSE, L"OrangeSpace.Client");
+  const bool another = session_mutex && GetLastError() == ERROR_ALREADY_EXISTS;
+  HANDLE global_mutex = CreateMutexW(nullptr, FALSE, L"Global\\OrangeSpace.Client");
+  (void)global_mutex;  // held until exit; may fail when another user's client owns it
+  if (another) {
+    if (remove_all) return 3;
+    if (HWND other = FindWindowW(L"OrangeSpaceWindow", nullptr)) {
+      ShowWindow(other, IsIconic(other) ? SW_RESTORE : SW_SHOW);
+      SetForegroundWindow(other);
+    }
+    return 0;
+  }
+  // The uninstaller's "delete all data" (for the Windows user running it).
+  if (remove_all) {
+    try {
+      ss::remove_all_local_data();
+      return 0;
+    } catch (const std::exception&) {
+      return 1;
+    }
+  }
   std::shared_ptr<std::string> password;
   if (password_stdin && !username.empty()) {
     password = std::make_shared<std::string>();

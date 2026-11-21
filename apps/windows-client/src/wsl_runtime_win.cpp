@@ -88,6 +88,56 @@ void import_distribution(const std::wstring& rootfs, const std::wstring& install
     throw RuntimeError("wsl --import failed");
 }
 
+DWORD run_as_root(const std::vector<std::wstring>& command, HANDLE in, HANDLE out, HANDLE err, DWORD timeout_ms) {
+  const auto exe = wsl_executable();
+  if (exe.empty()) throw RuntimeError("WSL is not installed");
+  if (command.empty()) throw RuntimeError("no command");
+  SECURITY_ATTRIBUTES inherit{sizeof(inherit), nullptr, TRUE};
+  Handle null_in, null_out;
+  null_in.h = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &inherit, OPEN_EXISTING, 0, nullptr);
+  null_out.h = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &inherit, OPEN_EXISTING, 0, nullptr);
+  HANDLE std_in = in ? in : null_in.h, std_out = out ? out : null_out.h, std_err = err ? err : null_out.h;
+  for (HANDLE h : {std_in, std_out, std_err})
+    if (!h || h == INVALID_HANDLE_VALUE || !SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT))
+      throw RuntimeError("cannot prepare the command's handles");
+  SIZE_T size = 0;
+  InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
+  std::vector<unsigned char> storage(size);
+  auto* attrs = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
+  if (!InitializeProcThreadAttributeList(attrs, 1, 0, &size)) throw RuntimeError("cannot prepare the command");
+  std::vector<HANDLE> handles{std_in};
+  for (HANDLE h : {std_out, std_err})
+    if (std::find(handles.begin(), handles.end(), h) == handles.end()) handles.push_back(h);
+  UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles.data(), handles.size() * sizeof(HANDLE),
+                            nullptr, nullptr);
+  STARTUPINFOEXW si{};
+  si.StartupInfo.cb = sizeof(si);
+  si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+  si.StartupInfo.hStdInput = std_in;
+  si.StartupInfo.hStdOutput = std_out;
+  si.StartupInfo.hStdError = std_err;
+  si.lpAttributeList = attrs;
+  std::wstring line = quote(exe) + L" -d " + std::wstring(kDistribution) + L" -u root --cd / --";
+  for (const auto& a : command) line += L" " + quote(a);
+  PROCESS_INFORMATION pi{};
+  const BOOL started = CreateProcessW(exe.c_str(), line.data(), nullptr, nullptr, TRUE,
+                                      CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
+                                      &si.StartupInfo, &pi);
+  DeleteProcThreadAttributeList(attrs);
+  // The caller's handles go back to not inheritable.
+  for (HANDLE h : {in, out, err})
+    if (h) SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+  if (!started) throw RuntimeError("cannot start wsl.exe");
+  Handle process{pi.hProcess}, thread{pi.hThread};
+  if (WaitForSingleObject(pi.hProcess, timeout_ms) != WAIT_OBJECT_0) {
+    TerminateProcess(pi.hProcess, 1);
+    throw RuntimeError("the command timed out");
+  }
+  DWORD code = 1;
+  GetExitCodeProcess(pi.hProcess, &code);
+  return code;
+}
+
 void terminate_distribution() { (void)run_wsl({L"--terminate", kDistribution}, 60000); }
 
 void unregister_distribution() {
