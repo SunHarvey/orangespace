@@ -71,7 +71,8 @@ def test_lease_view_rbac_pagination_and_strict_query(control):
     ticket = ticket.json()
     federation = client.post(CONSUME, headers=machine, json=dict(schema=1, exchange_id=ticket['exchange_id'], exchange_token=ticket['exchange_token'], request_id=str(uuid4())))
     assert federation.status_code == 200
-    own_body = dict(body, federation_session_id=federation.json()['federation']['federation_session_id'])
+    # Tunnel IDs are single-use across users and sessions; this user's tunnel is its own.
+    own_body = dict(body, federation_session_id=federation.json()['federation']['federation_session_id'], tunnel_id=str(uuid4()))
     expected = set()
     for operation in ('create', 'renew', 'renew'):
         issued = client.post(PERMIT, headers=machine, json=dict(own_body, operation=operation, request_id=str(uuid4())))

@@ -23,7 +23,7 @@ orangespace-node-migrate upgrade --database-config /etc/orangespace/database.jso
 orangespace-node-migrate verify --database-config /etc/orangespace/database.json
 ```
 
-节点 head 为 `node_0002`，中心 head 为 `control_0006`。在 `server` 目录执行 `alembic -c alembic-control.ini -x config=/etc/orangespace/control.json upgrade head`，中心配置只传受保护文件路径。服务启动只校验已迁移版本，不执行 create_all。MySQL DDL 有隐式提交，不能把失败 DDL 说成事务自动回滚。当前 schema downgrade 测试只在明确提供的可丢弃测试库执行，不是带业务数据的生产回滚方案。
+节点 head 为 `node_0002`，中心 head 为 `control_0007`。在 `server` 目录执行 `alembic -c alembic-control.ini -x config=/etc/orangespace/control.json upgrade head`，中心配置只传受保护文件路径。服务启动只校验已迁移版本，不执行 create_all。MySQL DDL 有隐式提交，不能把失败 DDL 说成事务自动回滚。当前 schema downgrade 测试只在明确提供的可丢弃测试库执行，不是带业务数据的生产回滚方案。
 
 ## 必须保持的身份归属
 
@@ -41,7 +41,7 @@ orangespace-node-migrate verify --database-config /etc/orangespace/database.json
 - 真实 MySQL 8.4.13：严格工厂、Node Alembic、InnoDB/NO PAD、唯一/FK、反重放历史保留及 schema 往返测试通过。
 - 原节点认证、个人文件共享/隔离、目录/上传/下载/Range/撤销及描述符清理等38项，已在真实 MySQL 的独立 schema 通过。
 - 中心管理员初始化、登录、用户增改、密码重置、会话失效/跨用户拒绝/分页与管理员审计初始测试通过。前端构建/单元测试不等于浏览器与 Windows 联合验收。
-- 最新本地完整套件：真实 MySQL 8.4.13 + approved sing-box 1.14.4，258 passed、0 skipped、0 failed、17 warnings，945.39 秒；包括中心/节点 ASGI、联邦授权及真实本地 TUIC 撤销边界，详见 server/TUNNELS.md。不是已部署声明。
+- 最新完整套件（2026-11-21）：真实 MySQL 8.4.13 + approved sing-box 1.14.4，463 passed、0 skipped、0 failed，185.94 秒；包括中心/节点 ASGI、联邦授权及真实本地 TUIC 撤销边界，详见 server/TUNNELS.md。不是已部署声明。
 - 仍缺非空历史数据离线导入/冲突处理，以及 Windows 独立平台授权、WFP 与完整数据面联合验收；不以生产切换/回滚待办阻塞开发。
 - CI 定义已改向 MySQL；只有推送后相同提交的真实 GitHub CI 成功才能认定发布验证，不使用历史 PostgreSQL CI 替代。
 

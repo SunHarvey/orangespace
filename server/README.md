@@ -86,6 +86,6 @@ Windows 客户端必须把文件任务绑定到创建时的 `node_id`、认证�
 
 真实数据库测试设置 `ORANGESPACE_TEST_MYSQL_CONFIG=/private/node-test.json` 和 `ORANGESPACE_CONTROL_TEST_CONFIG=/private/control-test.json`（只传路径，不传 DSN）。测试使用专用 MySQL 8.4 实例；每例/模块创建唯一自有 schema、显式迁移，并精确删除自己的 schema；提供的源数据库不重建。测试账号需要相应临时 schema 创建权限。未配置真库明确跳过；部署/CI验收不得把跳过算通过。历史名称 `test_postgres.py` 当前内容已改为 MySQL 文件 API 验收，不再测试正式 PostgreSQL 运行。
 
-当前源码仅支持 MySQL 正式运行，节点迁移 head 为 `node_0002`，中心为 `control_0006`。中心在 `server` 目录通过 `.venv/bin/alembic -c alembic-control.ini -x config=/etc/orangespace/control.json upgrade head` 显式迁移；节点 upgrade/verify 见上文。启动只检查版本，不自动迁移。
+当前源码仅支持 MySQL 正式运行，节点迁移 head 为 `node_0002`，中心为 `control_0007`。中心在 `server` 目录通过 `.venv/bin/alembic -c alembic-control.ini -x config=/etc/orangespace/control.json upgrade head` 显式迁移；节点 upgrade/verify 见上文。启动只检查版本，不自动迁移。
 
-最新本地完整验证：真实 MySQL **8.4.13** 与已核验 sing-box **1.14.4**，**258 passed、0 skipped、0 failed、17 warnings，945.39 秒**。包含中心/节点 ASGI 与真实本地 TUIC 夹具，不能推断已部署、生产 HTTPS、Windows/WFP 或完整阶段验收。CI 必须在推送后按精确提交另查，不以本地通过替代。迁移边界见 [迁移说明](../docs/mysql-migration.md)，统一身份接口见 [控制面契约](../docs/control-plane-contract-v1.md)。
+最新完整验证（2026-11-21，局域网测试主机上的一次性 MySQL 容器）：真实 MySQL **8.4.13** 与已核验 sing-box **1.14.4**，**463 passed、0 skipped、0 failed，185.94 秒**。包含中心/节点 ASGI 与真实本地 TUIC 夹具，不能推断已部署、生产 HTTPS、Windows/WFP 或完整阶段验收。CI 必须在推送后按精确提交另查，不以本地通过替代。迁移边界见 [迁移说明](../docs/mysql-migration.md)，统一身份接口见 [控制面契约](../docs/control-plane-contract-v1.md)。
