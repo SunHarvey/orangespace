@@ -7,7 +7,7 @@ The pipes belong to the client process, so owning them is the
 authentication: no port, socket or named pipe is exposed.
 
 Wire format: after the agent writes MARKER, both sides exchange frames from
-bridge/wire.py (`!BII` = kind, number, payload size; payload <= 64 KiB). Only
+wire.py (`!BII` = kind, number, payload size; payload <= 64 KiB). Only
 REQUEST (client -> agent) and REPLY (agent -> client) are used. Requests are
 JSON objects with an "op"; replies are JSON objects, with "error" on failure.
 Anything the agent logs goes to stderr, never stdout.
@@ -21,7 +21,7 @@ from pathlib import Path
 import sys
 import threading
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bridge"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from wire import Channel, encode, REPLY, REQUEST  # noqa: E402
 
 MARKER = b"OrangeSpace-WSL-Agent-v1\n"
@@ -114,7 +114,7 @@ class Agent:
         self.ops = {"ping": self.ping, "facts": lambda request: facts(), "shutdown": self.shutdown,
                     "desktop.start": self.desktop_start, "desktop.stop": self.desktop_simple,
                     "desktop.status": self.desktop_simple, "desktop.delete": self.desktop_simple,
-                    "desktop.configure": self.desktop_configure, "desktop.lease": self.desktop_lease,
+                    "desktop.lease": self.desktop_lease,
                     "desktop.renew": self.desktop_renew}
 
     def run_desktop(self, args, stdin=None, timeout=150):
@@ -152,13 +152,6 @@ class Agent:
             with self.started_lock:
                 self.started.pop(sandbox, None)
         return result
-
-    def desktop_configure(self, request):
-        user, sandbox = canonical(request["user"], "user"), canonical(request["sandbox"], "sandbox")
-        node, settings = canonical(request["node"], "node"), request["settings"]
-        if not isinstance(settings, str) or len(settings.encode("utf-8")) > MAX_NODE_CONFIG:
-            raise ValueError("node configuration must be UTF-8 text of at most 32768 bytes")
-        return self.run_desktop(["configure", user, sandbox, node], stdin=settings.encode("utf-8"), timeout=20)
 
     def desktop_lease(self, request):
         """A new node lease (tunnel credentials) for one sandbox; never logged."""

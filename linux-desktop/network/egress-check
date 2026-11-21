@@ -1,148 +1,180 @@
 #!/usr/bin/env python3
-"""Measures where a sandbox's traffic really goes (run as root in the OrangeSpace
-distribution while that sandbox's desktop is stopped).
+"""Where a running sandbox's traffic really goes (run as root in the OrangeSpace
+distribution while that sandbox's desktop is running with its gateway ready).
 
-    egress-check <sandbox-uuid>:<node-uuid> [<sandbox-uuid>:<node-uuid> ...]
+    egress-check <sandbox-uuid> [<expected egress ipv4>]
 
-Starts a throw-away container with the desktop container's network isolation
-(no network until the sandbox gateway attaches), attaches the sandbox's real
-gateway (network/up), and checks actual delivery:
+Runs, inside the desktop container `osdesk-<sandbox>` as its desktop user, what
+IP/DNS/WebRTC/QUIC leak test pages measure, and asks each remote service which
+address it saw:
 
-  egress_ip         HTTPS to a public echo service shows the bound node's IP
-  dns_via_node      a resolver-reflection query answered from the node's side
-  ipv6_blocked      no IPv6 connectivity
-  wsl_host_blocked  the WSL host (default gateway of the distribution) unreachable
-  lan_blocked       a private LAN address unreachable
-  metadata_blocked  the cloud metadata address unreachable (refused by the node)
-  sibling_blocked   the other given sandboxes' gateway links unreachable
+  https_ip      HTTPS to a public echo service
+  dns_system    the system resolver, as seen by Akamai's authoritative servers
+  dns_direct    a query sent straight to 8.8.8.8, as seen by Google
+  stun_google   WebRTC-style STUN binding (server-reflexive address)
+  stun_cloudflare
+  quic          the desktop's Chromium forced onto HTTP/3 (its own sandbox kept)
+  ipv6_blocked  no IPv6 connectivity
 
-Prints one line per check and exits 0 only if all pass. Uses a tiny test image
-(localhost/orangespace/nettest:dev, built on first use).
+and that nothing local answers (TCP connect times out or is unreachable):
+
+  wsl_host_blocked   the WSL host (the distribution's default gateway)
+  lan_blocked        a private LAN address
+  metadata_blocked   the cloud metadata address 100.100.100.200
+  gateways_blocked   every sandbox's gateway link, this one's and its siblings'
+
+Passes (exit 0) only if every service saw one and the same IPv4 address (the
+given one, if any), Chromium really used HTTP/3, IPv6 is unreachable and no local
+address answers. Uses
+third-party services (ipify, Akamai, Google, Cloudflare); it measures what they
+see, not packet paths: capture on the Windows network adapter for that.
 """
+import ipaddress
 import json
-from pathlib import Path
 import subprocess
 import sys
 import uuid
 
-NETWORK = Path(__file__).resolve().parent
-IMAGE = "localhost/orangespace/nettest:dev"
-CONTAINERFILE = """FROM docker.io/library/debian:trixie-slim
-RUN apt-get update && apt-get install -y --no-install-recommends curl dnsutils ca-certificates iputils-ping \\
-    && rm -rf /var/lib/apt/lists/*
-"""
+PROBE = r'''
+import json, secrets, shutil, socket, struct, subprocess, sys, tempfile, urllib.request
+out = {}
+def run(name, fn):
+    try:
+        out[name] = fn()
+    except Exception as e:
+        out[name] = "FAIL " + type(e).__name__
+def dns_txt(server, name):
+    qid = secrets.randbits(16)
+    q = struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0)
+    q += b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\0" + struct.pack(">HH", 16, 1)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.settimeout(6)
+        s.sendto(q, (server, 53))
+        r = s.recv(4096)
+    if struct.unpack(">H", r[0:2])[0] != qid:
+        raise ValueError("mismatched reply")
+    def skip(i):
+        while True:
+            if r[i] == 0:
+                return i + 1
+            if r[i] & 0xC0 == 0xC0:
+                return i + 2
+            i += r[i] + 1
+    i = skip(12) + 4
+    for _ in range(struct.unpack(">H", r[6:8])[0]):
+        i = skip(i)
+        typ, _, _, ln = struct.unpack(">HHIH", r[i:i + 10])
+        if typ == 16:
+            data = r[i + 10:i + 10 + ln]
+            return data[1:1 + data[0]].decode()
+        i += 10 + ln
+    raise ValueError("no TXT answer")
+def stun(host, port):
+    req = struct.pack(">HHI", 1, 0, 0x2112A442) + secrets.token_bytes(12)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.settimeout(6)
+        s.sendto(req, (host, port))
+        r = s.recv(2048)
+    i = 20
+    while i + 4 <= len(r):
+        t, ln = struct.unpack(">HH", r[i:i + 4])
+        if t == 0x0020:
+            ip = struct.unpack(">I", r[i + 8:i + 12])[0] ^ 0x2112A442
+            return socket.inet_ntoa(struct.pack(">I", ip))
+        i += 4 + ((ln + 3) & ~3)
+    raise ValueError("no mapped address")
+def quic():
+    profile = tempfile.mkdtemp(prefix="leak-check-")
+    try:
+        p = subprocess.run(["chromium", "--headless=new", "--disable-gpu", "--user-data-dir=" + profile,
+                            "--enable-quic", "--origin-to-force-quic-on=www.cloudflare.com:443",
+                            "--dump-dom", "https://www.cloudflare.com/cdn-cgi/trace"],
+                           capture_output=True, text=True, timeout=60)
+    finally:
+        shutil.rmtree(profile, ignore_errors=True)
+    lines = p.stdout.replace("<", "\n").replace(">", "\n").splitlines()
+    return dict(l.split("=", 1) for l in lines if l.split("=", 1)[0] in ("ip", "http"))
+def ipv6():
+    try:
+        socket.create_connection(("2606:4700:4700::1111", 443), timeout=5).close()
+    except OSError:
+        return True
+    return False
+def silent(address, port):
+    # Blocked means nobody answers: a refusal is an answer from some host.
+    try:
+        socket.create_connection((address, port), timeout=3).close()
+        return "connected"
+    except ConnectionRefusedError:
+        return "refused"
+    except OSError:
+        return "blocked"
+run("https_ip", lambda: urllib.request.urlopen("https://api.ipify.org", timeout=10).read().decode())
+run("dns_system", lambda: socket.gethostbyname("whoami.akamai.net"))
+run("dns_direct", lambda: dns_txt("8.8.8.8", "o-o.myaddr.l.google.com"))
+run("stun_google", lambda: stun("stun.l.google.com", 19302))
+run("stun_cloudflare", lambda: stun("stun.cloudflare.com", 3478))
+run("quic", quic)
+run("ipv6_blocked", ipv6)
+out["local"] = {f"{a}:{p}": silent(a, p) for a in sys.argv[1:] for p in (80, 443)}
+print(json.dumps(out))
+'''
 
 
-def run(*args, check=True, timeout=60, stdin=None):
-    result = subprocess.run(args, input=stdin, capture_output=True, text=True, timeout=timeout)
-    if check and result.returncode:
-        raise RuntimeError(f"{args[0]} {args[1] if len(args) > 1 else ''} failed: {result.stderr.strip()[-300:]}")
-    return result
-
-
-def node_endpoint(sandbox, node):
-    path = Path("/var/lib/orangespace/desktop/instances") / sandbox / "nodes" / (node + ".json")
-    return json.loads(path.read_text())["endpoint_ip"]
-
-
-def link_addresses():
-    """IPv4 addresses of all sandbox gateway links (osw*) in the root namespace."""
-    out = run("ip", "-j", "addr", check=False).stdout or "[]"
-    prefix = "osw"
-    found = []
-    for link in json.loads(out):
-        if link.get("ifname", "").startswith(prefix):
+def local_targets():
+    """The WSL host, a LAN address, cloud metadata, and every sandbox gateway link."""
+    route = subprocess.run(["ip", "-4", "route", "show", "default"], capture_output=True, text=True).stdout.split()
+    host = route[route.index("via") + 1] if "via" in route else "172.16.0.1"
+    gateways = []
+    for link in json.loads(subprocess.run(["ip", "-j", "addr"], capture_output=True, text=True).stdout or "[]"):
+        if link.get("ifname", "").startswith("osw"):
             for addr in link.get("addr_info", []):
                 if addr.get("family") == "inet":
-                    found.append(addr["local"])
-    return found
+                    net = ipaddress.ip_interface(f"{addr['local']}/{addr['prefixlen']}").network
+                    gateways += [str(h) for h in net.hosts()]
+    return {"wsl_host_blocked": [host], "lan_blocked": ["192.168.1.1"],
+            "metadata_blocked": ["100.100.100.200"], "gateways_blocked": gateways}
 
 
-def start(sandbox, node):
-    name = "osnet-" + sandbox
-    run("podman", "rm", "-f", name, check=False)
-    run("podman", "run", "-d", "--name", name, "--network=none", "--cap-drop=ALL",
-        "--security-opt=no-new-privileges", "--read-only", "--tmpfs", "/tmp",
-        "--mount", f"type=bind,src={NETWORK.parent / 'guest' / 'resolv.conf'},dst=/etc/resolv.conf,readonly",
-        IMAGE, "sleep", "900")
-    pid = run("podman", "inspect", "--format", "{{.State.Pid}}", name).stdout.strip()
-    if run(str(NETWORK / "up"), sandbox, pid, node, check=False, timeout=60).returncode:
-        raise RuntimeError(f"gateway of {sandbox} did not come up")
-    return name
-
-
-def stop(sandbox):
-    run(str(NETWORK / "down"), sandbox, check=False)
-    run("podman", "rm", "-f", "osnet-" + sandbox, check=False)
-
-
-def check(sandbox, node, siblings):
-    name = "osnet-" + sandbox
-    expected = node_endpoint(sandbox, node)
-
-    def inside(*args, timeout=20):
-        return run("podman", "exec", name, *args, check=False, timeout=timeout)
-
-    results = {}
-    ip = inside("curl", "-4", "-sS", "--max-time", "12", "https://api.ipify.org").stdout.strip()
-    results["egress_ip"] = (ip == expected, f"{ip or 'none'} (node {expected})")
-    dns = inside("dig", "+short", "+time=4", "+tries=1", "@1.1.1.1", "whoami.cloudflare", "CH", "TXT").stdout
-    dns_ip = dns.strip().strip('"')
-    results["dns_via_node"] = (dns_ip == expected, f"resolver saw {dns_ip or 'nothing'}")
-    v6 = inside("curl", "-6", "-sS", "--max-time", "6", "https://api64.ipify.org")
-    results["ipv6_blocked"] = (v6.returncode != 0, f"curl exit {v6.returncode}")
-    route = run("ip", "-4", "route", "show", "default").stdout.split()
-    host_ip = route[route.index("via") + 1] if "via" in route else "172.16.0.1"
-    host = inside("curl", "-sS", "--max-time", "5", f"http://{host_ip}/")
-    results["wsl_host_blocked"] = (host.returncode != 0, f"{host_ip}: curl exit {host.returncode}")
-    lan = inside("curl", "-sS", "--max-time", "5", "http://192.168.1.1/")
-    results["lan_blocked"] = (lan.returncode != 0, f"192.168.1.1: curl exit {lan.returncode}")
-    meta = inside("curl", "-sS", "--max-time", "6", "http://100.100.100.200/latest/meta-data/")
-    results["metadata_blocked"] = (meta.returncode != 0 or not meta.stdout.strip(),
-                                   f"curl exit {meta.returncode}, {len(meta.stdout)} bytes")
-    reached, tried = [], []
-    for addr in siblings:
-        tried.append(addr)
-        if inside("ping", "-c", "1", "-W", "2", addr).returncode == 0 or \
-                inside("curl", "-sS", "--max-time", "4", f"http://{addr}/").returncode == 0:
-            reached.append(addr)
-    results["sibling_blocked"] = (bool(tried) and not reached,
-                                  f"tried {', '.join(tried) or 'nothing'}; reached {', '.join(reached) or 'none'}")
-    return results
-
-
-def main(argv):
-    """egress-check <sandbox>:<node> [<sandbox>:<node> ...] — all are attached together,
-    so each is also checked against the others' gateway links."""
-    pairs = [a.split(":", 1) for a in argv]
-    if not pairs or any(len(p) != 2 for p in pairs):
-        print("usage: egress-check <sandbox-uuid>:<node-uuid> [<sandbox-uuid>:<node-uuid> ...]")
+def main():
+    if len(sys.argv) not in (2, 3):
+        print("usage: egress-check <sandbox-uuid> [<expected egress ipv4>]", file=sys.stderr)
         return 2
-    for sandbox, node in pairs:
-        if str(uuid.UUID(sandbox)) != sandbox or str(uuid.UUID(node)) != node:
-            raise ValueError("expected canonical UUIDs")
-    if run("podman", "image", "exists", IMAGE, check=False).returncode:
-        run("podman", "build", "--tag", IMAGE, "-f", "-", ".", stdin=CONTAINERFILE, timeout=900)
-    failed = 0
-    try:
-        before = set(link_addresses())
-        links = {}
-        for sandbox, node in pairs:
-            start(sandbox, node)
-            now = set(link_addresses())
-            links[sandbox], before = sorted(now - before), now
-        for sandbox, node in pairs:
-            siblings = [a for other, addrs in links.items() if other != sandbox for a in addrs]
-            print(f"== sandbox {sandbox}")
-            for key, (ok, detail) in check(sandbox, node, siblings).items():
-                print(f"  {key:18} {'PASS' if ok else 'FAIL'}  {detail}")
-                failed += 0 if ok else 1
-    finally:
-        for sandbox, _ in pairs:
-            stop(sandbox)
-    print("ALL PASSED" if not failed else f"FAILED ({failed})")
-    return 0 if not failed else 1
+    sandbox = str(uuid.UUID(sys.argv[1]))
+    expected = sys.argv[2] if len(sys.argv) == 3 else None
+    targets = local_targets()
+    probe = subprocess.run(["podman", "exec", "-i", "osdesk-" + sandbox, "python3", "-",
+                            *[a for group in targets.values() for a in group]], input=PROBE,
+                           capture_output=True, text=True, timeout=300)
+    if probe.returncode:
+        print(f"FAIL probe did not run: {probe.stderr.strip()[-200:]}")
+        return 1
+    seen = json.loads(probe.stdout.strip().splitlines()[-1])
+    quic = seen.get("quic") if isinstance(seen.get("quic"), dict) else {}
+    addresses = {name: seen.get(name) for name in ("https_ip", "dns_system", "dns_direct", "stun_google", "stun_cloudflare")}
+    addresses["quic"] = quic.get("ip")
+    reference = expected or addresses["https_ip"]
+    ok = True
+    for name, value in addresses.items():
+        good = value == reference
+        ok &= good
+        print(f"{'PASS' if good else 'FAIL'} {name:16s} {value}")
+    http3 = quic.get("http") == "http/3"
+    ok &= http3
+    print(f"{'PASS' if http3 else 'FAIL'} {'quic_http3':16s} {quic.get('http')}")
+    blocked = seen.get("ipv6_blocked") is True
+    ok &= blocked
+    print(f"{'PASS' if blocked else 'FAIL'} {'ipv6_blocked':16s} {seen.get('ipv6_blocked')}")
+    for name, addresses in targets.items():
+        answers = {key: value for key, value in seen.get("local", {}).items() if key.rsplit(":", 1)[0] in addresses}
+        good = bool(answers) and all(value == "blocked" for value in answers.values())
+        ok &= good
+        reached = sorted(key for key, value in answers.items() if value != "blocked")
+        print(f"{'PASS' if good else 'FAIL'} {name:16s} {', '.join(addresses) or 'none'}"
+              + (f" (answered: {', '.join(reached)})" if reached else ""))
+    print(("PASS all checks; every service saw " if ok else "FAIL; expected ") + str(reference))
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main())

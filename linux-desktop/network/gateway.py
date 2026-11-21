@@ -1,4 +1,9 @@
-"""Private, root-only IPv4 gateway for an OrangeSpace desktop in a dedicated Linux VM."""
+"""Private, root-only IPv4 gateway for one OrangeSpace desktop in the WSL distribution.
+
+The only authority to reach a node is that sandbox's current node lease, handed
+over by the client (via the guest agent) and renewed by it. Each renewal extends
+a kernel-timed permit; when renewals stop the kernel withdraws it on its own.
+"""
 import argparse
 import contextlib
 import fcntl
@@ -19,8 +24,6 @@ import time
 from uuid import UUID
 
 STATE = Path("/run/orangespace-network")
-NODES = Path("/etc/orangespace/nodes")
-INSTANCES = Path("/var/lib/orangespace/desktop/instances")
 # Node leases live on tmpfs only: their credentials never reach a disk.
 LEASES = Path("/run/orangespace/leases")
 LEASE_MARGIN_MS = 500
@@ -29,8 +32,7 @@ NETNS = Path("/run/netns")
 POOL = ipaddress.IPv4Address("10.243.0.0")
 DESKTOP_PEER = "192.168.254.1"
 DESKTOP_IP = "192.168.254.2"
-WINDOW = 15
-CHECK_INTERVAL = 3
+PROBE_CACHE_SECONDS = 3
 TUN_START_SECONDS = 15
 BLOCKED = ("0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
            "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4")
@@ -55,50 +57,42 @@ def valid_tls_name(name):
             all(re.fullmatch(label, part) for part in name.split(".")))
 
 
-def node_policy(record, sandbox_id):
-    allowed = {"endpoint_ip", "endpoint_port", "tls_server_name", "bindings",
-               "ttl_seconds", "authorization", "certificate_pem", "probe", "tunnel_id", "deadline"}
-    if not isinstance(record, dict) or record.keys() - allowed:
-        raise GatewayError("invalid node file fields")
-    if not isinstance(record["endpoint_ip"], str):
+LEASE_FIELDS = {"node_id", "endpoint_ip", "endpoint_port", "tls_server_name", "certificate_pem",
+                "uuid", "password", "tunnel_id", "deadline", "probe"}
+
+
+def lease_policy(lease, node_id):
+    """Validate one stored node lease; returns (sing-box outbound, seconds left, probe)."""
+    if not isinstance(lease, dict) or lease.keys() - LEASE_FIELDS:
+        raise GatewayError("invalid node lease fields")
+    if lease.get("node_id") != uuid_text(node_id):
+        raise GatewayError("the lease is for another node")
+    uuid_text(lease.get("tunnel_id"))
+    if type(lease.get("deadline")) is not float:
+        raise GatewayError("invalid node lease")
+    # The permit lasts exactly as long as the lease the client last renewed
+    # (minus a margin), then the kernel withdraws it.
+    ttl = lease["deadline"] - time.clock_gettime(time.CLOCK_BOOTTIME)
+    if not 0.001 <= ttl <= MAX_LEASE_MS / 1000:
+        raise GatewayError("node lease expired")
+    if not isinstance(lease.get("endpoint_ip"), str):
         raise GatewayError("a literal IPv4 address is required")
-    ip = ipaddress.IPv4Address(record["endpoint_ip"])
+    ip = ipaddress.IPv4Address(lease["endpoint_ip"])
     if ip.is_loopback or ip.is_multicast or ip.is_unspecified or ip.is_link_local or ip.is_reserved:
         raise GatewayError("invalid node IPv4 endpoint")
-    port = record["endpoint_port"]
-    ttl = record.get("ttl_seconds")
+    port = lease.get("endpoint_port")
     if type(port) is not int or not 1 <= port <= 65535:
         raise GatewayError("invalid node port")
-    lease = record.get("authorization") == "lease"
-    if lease:
-        # A node lease: the permit lasts exactly as long as the lease the client
-        # last renewed (minus a margin), then the kernel withdraws it.
-        if "ttl_seconds" in record or type(record.get("deadline")) is not float:
-            raise GatewayError("invalid node lease")
-        uuid_text(record.get("tunnel_id"))
-        ttl = record["deadline"] - time.clock_gettime(time.CLOCK_BOOTTIME)
-        if not 0.001 <= ttl <= MAX_LEASE_MS / 1000:
-            raise GatewayError("node lease expired")
-    elif "tunnel_id" in record or "deadline" in record:
-        raise GatewayError("lease fields without a node lease")
-    elif "authorization" in record:
-        if record["authorization"] != "local-persistent" or "ttl_seconds" in record:
-            raise GatewayError("ambiguous or unknown local node authorization")
-    elif type(ttl) is not int or not 1 <= ttl <= 3600:
-        raise GatewayError("test node ttl_seconds must be 1..3600")
-    name = record["tls_server_name"]
+    name = lease.get("tls_server_name")
     if not valid_tls_name(name):
         raise GatewayError("invalid node TLS name")
-    binding = record["bindings"][sandbox_id]
-    if set(binding) != {"uuid", "password"}:
-        raise GatewayError("invalid binding fields")
-    uid = uuid_text(binding["uuid"])
-    password = binding["password"]
+    uid = uuid_text(lease.get("uuid"))
+    password = lease.get("password")
     if not isinstance(password, str) or not password or len(password) > 4096:
-        raise GatewayError("invalid binding credentials")
+        raise GatewayError("invalid lease credentials")
     tls = {"enabled": True, "server_name": name}
-    if "certificate_pem" in record:
-        certificate = record["certificate_pem"]
+    if "certificate_pem" in lease:
+        certificate = lease["certificate_pem"]
         if not isinstance(certificate, str) or not certificate.startswith("-----BEGIN CERTIFICATE-----"):
             raise GatewayError("invalid certificate_pem")
         ssl.create_default_context(cadata=certificate)
@@ -106,56 +100,25 @@ def node_policy(record, sandbox_id):
     outbound = {"type": "tuic", "tag": "bound-node", "server": str(ip), "server_port": port,
                 "uuid": uid, "password": password, "tls": tls, "bind_interface": "wan0",
                 "udp_relay_mode": "native", "zero_rtt_handshake": False}
-    return outbound, ttl
+    return outbound, ttl, probe_spec(lease)
 
 
 def unique_fields(pairs):
     record = {}
     for key, value in pairs:
         if key in record:
-            raise GatewayError("duplicate node configuration field")
+            raise GatewayError("duplicate node lease field")
         record[key] = value
     return record
 
 
-def read_record(path, directory=None):
+def read_record(path):
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-    with os.fdopen(os.open(path, flags, dir_fd=directory), "r") as secret:
+    with os.fdopen(os.open(path, flags), "r") as secret:
         st = os.fstat(secret.fileno())
         if st.st_uid != 0 or st.st_mode & 0o077 or not stat.S_ISREG(st.st_mode):
-            raise GatewayError("node record must be a private root-owned regular file")
+            raise GatewayError("node lease must be a private root-owned regular file")
         return json.load(secret, object_pairs_hook=unique_fields)
-
-
-@contextlib.contextmanager
-def instance_nodes(sandbox_id, create=False):
-    with contextlib.ExitStack() as stack:
-        parent = None
-        for name in (INSTANCES, uuid_text(sandbox_id), "nodes"):
-            if name == "nodes" and create:
-                try:
-                    os.mkdir(name, 0o700, dir_fd=parent)
-                    os.fsync(parent)
-                except FileExistsError:
-                    pass
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=parent)
-            stack.callback(os.close, fd)
-            st = os.fstat(fd)
-            if st.st_uid != 0 or st.st_mode & 0o022:
-                raise GatewayError("untrusted node configuration directory")
-            parent = fd
-        yield parent
-
-
-def scoped_record(flat, sandbox_id, node_id):
-    if not isinstance(flat, dict) or flat.get("node_id") != node_id or "bindings" in flat:
-        raise GatewayError("node import does not match its selected binding")
-    record = dict(flat)
-    del record["node_id"]
-    record["bindings"] = {sandbox_id: {"uuid": record.pop("uuid"), "password": record.pop("password")}}
-    node_policy(record, sandbox_id)
-    probe_spec(record)
-    return record
 
 
 def lease_path(sandbox_id):
@@ -179,57 +142,23 @@ def store_lease(sandbox_id, node_id, stream):
     raw = stream.read(65537)
     if len(raw) > 65536:
         raise GatewayError("node lease exceeds 64 KiB")
-    flat = json.loads(raw, object_pairs_hook=unique_fields)
-    if not isinstance(flat, dict) or "deadline" in flat or "authorization" in flat:
+    lease = json.loads(raw, object_pairs_hook=unique_fields)
+    if not isinstance(lease, dict) or "deadline" in lease:
         raise GatewayError("invalid node lease")
-    remaining = flat.pop("remaining_ms", None)
+    remaining = lease.pop("remaining_ms", None)
     if type(remaining) is not int or not LEASE_MARGIN_MS < remaining <= MAX_LEASE_MS:
         raise GatewayError("invalid node lease budget")
-    flat.update(authorization="lease",
-                deadline=time.clock_gettime(time.CLOCK_BOOTTIME) + (remaining - LEASE_MARGIN_MS) / 1000)
-    scoped_record(flat, sandbox_id, uuid_text(node_id))
-    write_private(lease_path(sandbox_id), flat)
+    lease["deadline"] = time.clock_gettime(time.CLOCK_BOOTTIME) + (remaining - LEASE_MARGIN_MS) / 1000
+    lease_policy(lease, node_id)
+    write_private(lease_path(sandbox_id), lease)
 
 
-def read_node(sandbox_id, node_id):
-    filename = uuid_text(node_id) + ".json"
+def read_lease(sandbox_id, node_id):
     try:
-        flat = read_record(lease_path(sandbox_id))
+        lease = read_record(lease_path(sandbox_id))
     except FileNotFoundError:
-        flat = None
-    if flat is not None and flat.get("node_id") == node_id:
-        return scoped_record(flat, sandbox_id, node_id), "lease"
-    try:
-        with instance_nodes(sandbox_id) as directory:
-            private = read_record(filename, directory)
-    except FileNotFoundError:
-        return read_record(NODES / filename), "template"
-    return scoped_record(private, sandbox_id, node_id), "instance"
-
-
-def configure(sandbox_id, node_id, stream):
-    filename = uuid_text(node_id) + ".json"
-    raw = stream.read(65537)
-    if len(raw) > 65536:
-        raise GatewayError("node import exceeds 64 KiB")
-    flat = json.loads(raw, object_pairs_hook=unique_fields)
-    scoped_record(flat, sandbox_id, node_id)
-    with instance_nodes(sandbox_id, create=True) as directory:
-        temp = ".import-" + secrets.token_hex(16)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-        fd = os.open(temp, flags, 0o600, dir_fd=directory)
-        try:
-            with os.fdopen(fd, "w") as out:
-                json.dump(flat, out)
-                out.flush()
-                os.fsync(out.fileno())
-            os.replace(temp, filename, src_dir_fd=directory, dst_dir_fd=directory)
-            os.fsync(directory)
-        finally:
-            try:
-                os.unlink(temp, dir_fd=directory)
-            except FileNotFoundError:
-                pass
+        raise GatewayError("no node lease for this sandbox") from None
+    return lease, *lease_policy(lease, node_id)
 
 
 def probe_spec(record):
@@ -340,32 +269,6 @@ def service_property(unit, prop):
     return value
 
 
-def docker_forward(data, enable):
-    """Integrate with Docker's default FORWARD DROP without changing global policy."""
-    if not shutil.which("iptables"):
-        return
-    prefix = ["iptables", "-w", "5"]
-    table = subprocess.run([*prefix, "-S", "DOCKER-USER"], capture_output=True, timeout=10)
-    if table.returncode:
-        if table.returncode != 1:
-            table.check_returncode()
-        return
-    iface = f"osw{data['slot']:x}"
-    local = str(POOL + 4 * data["slot"] + 2)
-    node, port = data["endpoint"], str(data["port"])
-    for args in (["-i", iface, "-s", local, "-d", node, "-p", "udp", "--dport", port],
-                 ["-o", iface, "-s", node, "-d", local, "-p", "udp", "--sport", port,
-                  "-m", "conntrack", "--ctstate", "ESTABLISHED"]):
-        rule = [*args, "-m", "comment", "--comment", "OrangeSpace-" + iface, "-j", "ACCEPT"]
-        check = subprocess.run([*prefix, "-C", "DOCKER-USER", *rule], capture_output=True, timeout=10)
-        if check.returncode not in (0, 1):
-            check.check_returncode()
-        if enable and check.returncode == 1:
-            run(*prefix, "-I", "DOCKER-USER", *rule)
-        elif not enable and check.returncode == 0:
-            run(*prefix, "-D", "DOCKER-USER", *rule)
-
-
 @contextlib.contextmanager
 def lock(name):
     with (STATE / (name + ".lock")).open("a") as f:
@@ -390,12 +293,12 @@ class Gateway:
         self.state = STATE / (self.id + ".state")
         self.config = STATE / (self.id + ".conf")
 
-    def reserve(self, node_id, source, outbound, probe):
+    def reserve(self, node_id, tunnel_id, outbound, probe):
         with lock("allocation"):
             used = {json.loads(p.read_text())["slot"] for p in STATE.glob("*.state")}
             for slot in range(1, 16384):
                 if slot not in used and not Path("/sys/class/net", f"osw{slot:x}").exists():
-                    data = {"slot": slot, "node": node_id, "source": source, "endpoint": outbound["server"],
+                    data = {"slot": slot, "node": node_id, "tunnel": tunnel_id, "endpoint": outbound["server"],
                             "port": outbound["server_port"], "probe": probe, "ready_until": 0}
                     save(self.state, data)
                     return data
@@ -412,7 +315,6 @@ class Gateway:
         # Sever the only physical path before removing any filtering resource.
         if Path("/sys/class/net", wan).exists():
             run("ip", "link", "delete", wan)
-        docker_forward(data, False)
         if service_property(self.unit, "LoadState") != "not-found":
             run("systemctl", "stop", self.unit)
         for name in (self.ns, self.desk):
@@ -433,17 +335,14 @@ class Gateway:
             raise GatewayError("invalid desktop PID")
         if Path("/proc/sys/net/ipv4/ip_forward").read_text().strip() != "1":
             raise GatewayError("enable IPv4 forwarding on the dedicated guest")
-        record, source = read_node(self.id, node_id)
-        outbound, ttl = node_policy(record, self.id)
-        probe = probe_spec(record)
+        lease, outbound, ttl, probe = read_lease(self.id, node_id)
         # Keep the actual namespace inode pinned across attachment and PID reuse.
         fd = os.open(f"/proc/{pid}/ns/net", os.O_RDONLY)
         try:
             inode = os.fstat(fd)
             if os.path.samestat(inode, os.stat("/proc/self/ns/net")):
                 raise GatewayError("desktop must have a private network namespace")
-            data = self.reserve(node_id, source, outbound, probe)
-            data["tunnel"] = record.get("tunnel_id")
+            data = self.reserve(node_id, lease["tunnel_id"], outbound, probe)
             try:
                 run("ip", "netns", "attach", self.desk, str(pid))
                 if not os.path.samestat(inode, (NETNS / self.desk).stat()):
@@ -465,9 +364,8 @@ class Gateway:
         node, port = outbound["server"], outbound["server_port"]
         run("ip", "netns", "add", self.ns)
         self.inside("nft", "-f", "-", stdin=gateway_policy(node, port))
-        expires = time.clock_gettime(time.CLOCK_BOOTTIME) + ttl if ttl else None
-        run("nft", "-f", "-", stdin=root_policy(self.table, wan, gw_ip, node, port, ttl or WINDOW))
-        docker_forward(data, True)
+        expires = time.clock_gettime(time.CLOCK_BOOTTIME) + ttl
+        run("nft", "-f", "-", stdin=root_policy(self.table, wan, gw_ip, node, port, ttl))
         run("ip", "link", "add", wan, "type", "veth", "peer", "name", "wan0", "netns", self.ns)
         run("ip", "addr", "add", root_ip + "/30", "dev", wan)
         run("ip", "link", "set", wan, "up")
@@ -487,8 +385,6 @@ class Gateway:
         if not binary:
             raise GatewayError("sing-box is missing")
         command = [shutil.which("ip"), "netns", "exec", self.ns, binary, "run", "-c", str(self.config)]
-        if ttl is None:
-            command = [sys.executable, str(Path(__file__).resolve()), "supervise", self.id]
         run("systemd-run", "--quiet", "--collect", "--unit=" + self.unit,
             "--property=Type=exec", "--property=Restart=no",
             "--property=StandardOutput=null", "--property=StandardError=null",
@@ -525,66 +421,36 @@ class Gateway:
         if type(remaining_ms) is not int or not LEASE_MARGIN_MS < remaining_ms <= MAX_LEASE_MS:
             raise GatewayError("invalid node lease budget")
         path = lease_path(self.id)
-        flat = read_record(path)
-        if flat.get("authorization") != "lease" or flat.get("tunnel_id") != tunnel_id:
+        try:
+            lease = read_record(path)
+        except FileNotFoundError:
+            raise GatewayError("no node lease for this sandbox") from None
+        if lease.get("tunnel_id") != tunnel_id:
             raise GatewayError("not the sandbox's current tunnel")
-        now = time.clock_gettime(time.CLOCK_BOOTTIME)
-        flat["deadline"] = now + (remaining_ms - LEASE_MARGIN_MS) / 1000
-        write_private(path, flat)
+        lease["deadline"] = time.clock_gettime(time.CLOCK_BOOTTIME) + (remaining_ms - LEASE_MARGIN_MS) / 1000
+        write_private(path, lease)
         if not self.state.exists():
             return
         data = json.loads(self.state.read_text())
-        if data.get("source") != "lease" or data.get("tunnel") != tunnel_id:
+        if data.get("tunnel") != tunnel_id:
             return
         # One nft transaction: the permit is replaced, never briefly absent.
         timeout = remaining_ms - LEASE_MARGIN_MS
         run("nft", "-f", "-", stdin=(f"flush set inet {self.table} endpoints\n"
                                      f"add element inet {self.table} endpoints "
                                      f"{{ {data['endpoint']} . {data['port']} timeout {timeout}ms }}\n"))
-        data["ready_until"] = flat["deadline"]
+        data["ready_until"] = lease["deadline"]
         save(self.state, data)
 
     def ready(self):
         if not self.state.exists():
             return False
         data = json.loads(self.state.read_text())
-        return ((data["ready_until"] is None or time.clock_gettime(time.CLOCK_BOOTTIME) < data["ready_until"]) and
+        return (time.clock_gettime(time.CLOCK_BOOTTIME) < data["ready_until"] and
                 Path("/sys/class/net", f"osw{data['slot']:x}").exists() and
                 service_property(self.unit, "ActiveState") == "active" and
                 bool(json.loads(run("nft", "-j", "list", "set", "inet", self.table, "endpoints"))
                      ["nftables"][-1]["set"].get("elem")))
-
-    def supervise(self):
-        data = json.loads(self.state.read_text())
-        config = json.loads(self.config.read_text())
-        process = subprocess.Popen(["ip", "netns", "exec", self.ns, "sing-box", "run",
-                                    "-c", str(self.config)])
-        try:
-            while process.poll() is None:
-                record, source = read_node(self.id, data["node"])
-                current, ttl = node_policy(record, self.id)
-                if (source != data["source"] or ttl is not None or helper_config(current) != config
-                        or probe_spec(record) != data["probe"]):
-                    break
-                rules = (f"flush set inet {self.table} endpoints\n"
-                         f"add element inet {self.table} endpoints "
-                         f"{{ {current['server']} . {current['server_port']} timeout {WINDOW}s }}\n")
-                run("nft", "-f", "-", stdin=rules)
-                try:
-                    process.wait(CHECK_INTERVAL)
-                except subprocess.TimeoutExpired:
-                    pass
-        finally:
-            try:
-                run("nft", "flush", "set", "inet", self.table, "endpoints")
-            finally:
-                if process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(2)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait()
 
     def probe(self):
         if not self.ready():
@@ -593,7 +459,7 @@ class Gateway:
         if not data["probe"]:
             return 2
         now = time.clock_gettime(time.CLOCK_BOOTTIME)
-        if "probed_at" in data and now - data["probed_at"] < CHECK_INTERVAL:
+        if "probed_at" in data and now - data["probed_at"] < PROBE_CACHE_SECONDS:
             return data["probe_result"]
         try:
             child = subprocess.run(["ip", "netns", "exec", self.desk, sys.executable,
@@ -614,9 +480,6 @@ def main(argv=None):
     up.add_argument("sandbox_id")
     up.add_argument("container_pid", type=int)
     up.add_argument("node_id")
-    config = commands.add_parser("configure")
-    config.add_argument("sandbox_id")
-    config.add_argument("node_id")
     lease = commands.add_parser("lease")
     lease.add_argument("sandbox_id")
     lease.add_argument("node_id")
@@ -624,7 +487,7 @@ def main(argv=None):
     renew.add_argument("sandbox_id")
     renew.add_argument("tunnel_id")
     renew.add_argument("remaining_ms", type=int)
-    for name in ("down", "status", "probe", "probe-once", "supervise"):
+    for name in ("down", "status", "probe", "probe-once"):
         commands.add_parser(name).add_argument("sandbox_id")
     args = parser.parse_args(argv)
     os.umask(0o077)
@@ -633,9 +496,6 @@ def main(argv=None):
         parser.error("run as root inside the dedicated Linux guest")
     try:
         gateway = Gateway(args.sandbox_id)
-        if args.operation == "supervise":
-            gateway.supervise()
-            return 0
         if args.operation == "probe-once":
             return int(not https_probe(json.loads(gateway.state.read_text())["probe"]))
         STATE.mkdir(mode=0o700, exist_ok=True)
@@ -644,10 +504,6 @@ def main(argv=None):
                 gateway.up(args.container_pid, args.node_id)
             elif args.operation == "down":
                 gateway.down()
-            elif args.operation == "configure":
-                if gateway.state.exists():
-                    raise GatewayError("stop the sandbox gateway before configuring a node")
-                configure(gateway.id, args.node_id, sys.stdin.buffer)
             elif args.operation == "lease":
                 store_lease(gateway.id, args.node_id, sys.stdin.buffer)
             elif args.operation == "renew":
@@ -658,7 +514,7 @@ def main(argv=None):
                 return 1
         return 0
     except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError) as exc:
-        # Avoid JSON values or command arguments containing node credentials in logs.
+        # Avoid JSON values or command arguments containing lease credentials in logs.
         if isinstance(exc, GatewayError):
             print(f"gateway operation failed: {exc}", file=sys.stderr)
         elif isinstance(exc, subprocess.CalledProcessError):

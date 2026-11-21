@@ -1,5 +1,4 @@
-"""Node import regressions. Filesystem cases run as root on a disposable Linux guest."""
-from contextlib import ExitStack
+"""Node lease handling. Runs on Linux (CLOCK_BOOTTIME); storage cases need root."""
 from io import BytesIO
 import json
 import os
@@ -7,6 +6,7 @@ from pathlib import Path
 import stat
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -14,95 +14,84 @@ from uuid import uuid4
 import gateway
 
 
-class ImportTests(unittest.TestCase):
+def boottime():
+    return time.clock_gettime(time.CLOCK_BOOTTIME)
+
+
+@unittest.skipUnless(sys.platform == "linux", "CLOCK_BOOTTIME is Linux-only")
+class LeaseTests(unittest.TestCase):
     def setUp(self):
         self.a, self.b, self.node = (str(uuid4()) for _ in range(3))
-        self.record = {"node_id": self.node, "endpoint_ip": "203.0.113.12", "endpoint_port": 443,
-                       "tls_server_name": "gateway.example", "authorization": "local-persistent",
-                       "uuid": str(uuid4()), "password": "fixture-secret"}
+        self.tunnel = str(uuid4())
+        self.lease = {"node_id": self.node, "endpoint_ip": "203.0.113.12", "endpoint_port": 20000,
+                      "tls_server_name": "gateway.example", "uuid": str(uuid4()), "password": "fixture-secret",
+                      "tunnel_id": self.tunnel, "remaining_ms": 20000}
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(patch.object(gateway, "LEASES", self.root))
 
-    def test_validates_flat_binding_and_every_field(self):
-        for change in ({"node_id": self.b}, {"bindings": {}}, {"insecure": True},
-                       {"endpoint_port": True}, {"endpoint_ip": 7}, {"uuid": "bad"}, {"uuid": 17},
-                       {"tls_server_name": "bad..name"},
-                       {"password": ""}, {"probe": None}, {"certificate_pem": "bad"},
-                       {"authorization": "unknown"}, {"ttl_seconds": 30},
+    def store(self, sandbox, change=None, node=None):
+        payload = json.dumps({**self.lease, **(change or {})}).encode()
+        gateway.store_lease(sandbox, node or self.node, BytesIO(payload))
+
+    def test_rejects_every_invalid_field_and_budget(self):
+        for change in ({"remaining_ms": 500}, {"remaining_ms": 30001}, {"remaining_ms": 2.5},
+                       {"remaining_ms": None}, {"tunnel_id": "bad"}, {"deadline": 1.0},
+                       {"node_id": self.b}, {"insecure": True}, {"authorization": "local-persistent"},
+                       {"ttl_seconds": 30}, {"endpoint_port": True}, {"endpoint_ip": 7},
+                       {"endpoint_ip": "127.0.0.1"}, {"uuid": "bad"}, {"password": ""},
+                       {"tls_server_name": "bad..name"}, {"certificate_pem": "bad"}, {"probe": None},
                        {"probe": {"ipv4": "127.0.0.1", "tls_name": "probe.example", "path": "/ready"}}):
             with self.subTest(change=change), self.assertRaises((ValueError, TypeError)):
-                gateway.scoped_record({**self.record, **change}, self.a, self.node)
-        internal = gateway.scoped_record(self.record, self.a, self.node)
-        self.assertEqual(set(internal["bindings"]), {self.a})
-        self.assertNotIn("node_id", internal)
-
-    def test_lease_carries_its_tunnel_and_a_bounded_budget(self):
-        lease = {**self.record, "tunnel_id": str(uuid4()), "remaining_ms": 20000}
-        del lease["authorization"]
-        with tempfile.TemporaryDirectory() as root, patch.object(gateway, "LEASES", Path(root)):
-            for change in ({"remaining_ms": 500}, {"remaining_ms": 30001}, {"remaining_ms": 2.5},
-                           {"remaining_ms": None}, {"tunnel_id": "bad"}, {"deadline": 1.0},
-                           {"authorization": "lease"}, {"ttl_seconds": 30}, {"node_id": self.b}):
-                with self.subTest(change=change), self.assertRaises((ValueError, TypeError)):
-                    gateway.store_lease(self.a, self.node, BytesIO(json.dumps({**lease, **change}).encode()))
-            self.assertEqual(list(Path(root).iterdir()), [])
-            gateway.store_lease(self.a, self.node, BytesIO(json.dumps(lease).encode()))
-            stored = json.loads((Path(root) / (self.a + ".json")).read_text())
-            self.assertEqual(stored["authorization"], "lease")
-            self.assertNotIn("remaining_ms", stored)
-            outbound, ttl = gateway.node_policy(gateway.scoped_record(stored, self.a, self.node), self.a)
-            self.assertTrue(19 < ttl <= 19.5)
-            self.assertEqual(outbound["password"], "fixture-secret")
-        # A lease that has run out cannot start a gateway.
-        expired = {**self.record, "authorization": "lease", "tunnel_id": str(uuid4()), "deadline": 1.0}
+                self.store(self.a, change)
         with self.assertRaises(ValueError):
-            gateway.scoped_record(expired, self.a, self.node)
+            gateway.store_lease(self.a, self.node, BytesIO(b" " * 65537))
+        with self.assertRaises(ValueError):
+            gateway.store_lease(self.a, self.node, BytesIO(b'{"node_id":"x","node_id":"y"}'))
+        self.assertEqual(list(self.root.iterdir()), [])
 
-    @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0, "root-only guest storage")
-    def test_private_storage_atomicity_and_precedence(self):
-        with ExitStack() as stack:
-            root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
-            instances, templates = root / "instances", root / "templates"
-            instances.mkdir(mode=0o700)
-            templates.mkdir(mode=0o700)
-            stack.enter_context(patch.object(gateway, "INSTANCES", instances))
-            stack.enter_context(patch.object(gateway, "NODES", templates))
-            for sandbox in (self.a, self.b):
-                (instances / sandbox).mkdir(mode=0o700)
-
-            template = templates / (self.node + ".json")
-            common = gateway.scoped_record(self.record, self.a, self.node)
-            template.write_text(json.dumps(common))
-            template.chmod(0o600)
-            self.assertEqual(gateway.read_node(self.a, self.node)[1], "template")
-
-            def store(sandbox, record):
-                gateway.configure(sandbox, self.node, BytesIO(json.dumps(record).encode()))
-
-            store(self.a, self.record)
-            store(self.b, {**self.record, "password": "B-only"})
-            a_file = instances / self.a / "nodes" / template.name
-            b_file = instances / self.b / "nodes" / template.name
-            stable_a = a_file.read_bytes()
-            stable_b = b_file.read_bytes()
-            self.assertEqual((stat.S_IMODE(a_file.stat().st_mode), a_file.stat().st_uid), (0o600, 0))
-            for payload in (b'{"node_id":"wrong"}', b'{"node_id":1,"node_id":2}', b" " * 65537):
-                with self.assertRaises((ValueError, KeyError, TypeError)):
-                    gateway.configure(self.a, self.node, BytesIO(payload))
-                self.assertEqual(a_file.read_bytes(), stable_a)
-            store(self.a, {**self.record, "password": "rotated-A"})
-            record, source = gateway.read_node(self.a, self.node)
-            self.assertEqual(source, "instance")
-            self.assertEqual(record["bindings"][self.a]["password"], "rotated-A")
-            self.assertEqual(b_file.read_bytes(), stable_b)
-            self.assertEqual(json.loads(template.read_text()), common)
-            a_file.chmod(0o644)
+    def test_lease_is_bound_to_its_node_and_budget(self):
+        self.store(self.a)
+        stored = json.loads((self.root / (self.a + ".json")).read_text())
+        self.assertNotIn("remaining_ms", stored)
+        self.assertTrue(19 < stored["deadline"] - boottime() <= 19.5)
+        with patch.object(gateway, "read_record", side_effect=lambda path: json.loads(path.read_text())):
+            lease, outbound, ttl, probe = gateway.read_lease(self.a, self.node)
+            self.assertEqual((outbound["server"], outbound["server_port"], outbound["password"]),
+                             ("203.0.113.12", 20000, "fixture-secret"))
+            self.assertIsNone(probe)
+            # The lease names one node: it never authorizes another one.
             with self.assertRaises(ValueError):
-                gateway.read_node(self.a, self.node)
-            a_file.unlink()
-            a_file.symlink_to(b_file)
-            with self.assertRaises(OSError):
-                gateway.read_node(self.a, self.node)
-            a_file.unlink()
-            self.assertEqual(gateway.read_node(self.a, self.node)[1], "template")
+                gateway.read_lease(self.a, self.b)
+            # Another sandbox has no lease at all.
+            with self.assertRaises(ValueError):
+                gateway.read_lease(self.b, self.node)
+        expired = {**stored, "deadline": boottime() - 1}
+        with self.assertRaises(ValueError):
+            gateway.lease_policy(expired, self.node)
+
+    @unittest.skipUnless(os.geteuid() == 0, "root-owned lease storage")
+    def test_storage_is_private_and_renewal_needs_the_current_tunnel(self):
+        self.store(self.a)
+        self.store(self.b, {"password": "B-only"})
+        path = self.root / (self.a + ".json")
+        self.assertEqual((stat.S_IMODE(path.stat().st_mode), path.stat().st_uid), (0o600, 0))
+        before = json.loads(path.read_text())["deadline"]
+        gateway.Gateway(self.a).renew(self.tunnel, 25000)
+        self.assertGreater(json.loads(path.read_text())["deadline"], before)
+        for tunnel, budget in ((str(uuid4()), 25000), (self.tunnel, 500), (self.tunnel, 30001)):
+            with self.subTest(tunnel=tunnel, budget=budget), self.assertRaises(ValueError):
+                gateway.Gateway(self.a).renew(tunnel, budget)
+        with self.assertRaises(ValueError):
+            gateway.Gateway(str(uuid4())).renew(self.tunnel, 25000)
+        # B's lease is untouched by A's renewals.
+        self.assertEqual(gateway.read_lease(self.b, self.node)[0]["password"], "B-only")
+        path.chmod(0o644)
+        with self.assertRaises(ValueError):
+            gateway.read_lease(self.a, self.node)
+        path.unlink()
+        path.symlink_to(self.root / (self.b + ".json"))
+        with self.assertRaises(OSError):
+            gateway.read_lease(self.a, self.node)
 
 
 if __name__ == "__main__":

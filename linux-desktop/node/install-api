@@ -1,6 +1,6 @@
 #!/bin/sh
-# Installs the OrangeSpace node API (server/) as a federated node on a Rocky/RHEL 9
-# server that already has the TUIC node (./install) for its pinned sing-box.
+# Installs an OrangeSpace node (server/ API plus the pinned sing-box that serves
+# every lease tunnel) as a federated node on a Rocky/RHEL 9 server.
 # The node has no database and no accounts: sessions and leases live in memory
 # only, and the Centre decides who may use it. Run as root:
 #
@@ -8,6 +8,7 @@
 #
 # The tarball holds the repository's server/ directory. Re-running upgrades code
 # and configuration and keeps the keys and the enrollment. Creates:
+#   - sing-box 1.14.4 (SHA-256 pinned) at /opt/orangespace-node/bin/sing-box
 #   - unbound on 127.0.0.1:5353, the node-local resolver the lease tunnels use
 #   - a per-node private CA (key never leaves this server) issuing the HTTPS API
 #     certificate and the lease TUIC certificate; clients pin ca.crt
@@ -25,7 +26,6 @@ set -eu
 [ $# = 4 ] || { echo "usage: install-api <node uuid> <public ipv4> <tls name> <server.tar.gz>" >&2; exit 2; }
 NODE=$1 PUBLIC=$2 NAME=$3 SRC=$4
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 2; }
-[ -x /opt/orangespace-node/bin/sing-box ] || { echo "install the TUIC node first (./install)" >&2; exit 2; }
 python3 -c "import uuid,sys; u=sys.argv[1]; assert str(uuid.UUID(u))==u" "$NODE"
 python3 -c "import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])" "$PUBLIC"
 LISTEN=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
@@ -34,7 +34,22 @@ CONF=/etc/orangespace
 TLS=$CONF/tls
 STATE=/var/lib/orangespace
 
-dnf -y -q install python3.12 python3.12-pip nginx unbound openssl >/dev/null
+dnf -y -q install python3.12 python3.12-pip nginx unbound openssl tar >/dev/null
+
+# --- sing-box (the lease tunnel runtime) ----------------------------------------
+SB_VERSION=1.14.4
+SB_SHA256=699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968
+SB=/opt/orangespace-node/bin/sing-box
+if [ ! -x $SB ] || ! $SB version | grep -q "version $SB_VERSION\$"; then
+  T=$(mktemp -d)
+  curl -fsSL -o "$T/sb.tgz" \
+    "https://github.com/SagerNet/sing-box/releases/download/v$SB_VERSION/sing-box-$SB_VERSION-linux-amd64.tar.gz"
+  echo "$SB_SHA256  $T/sb.tgz" | sha256sum -c - >/dev/null
+  tar -xzf "$T/sb.tgz" -C "$T"
+  install -d -m 0755 /opt/orangespace-node/bin
+  install -m 0755 "$T/sing-box-$SB_VERSION-linux-amd64/sing-box" $SB
+  rm -rf "$T"
+fi
 getent passwd os-node >/dev/null ||
   useradd --system --home-dir $STATE --no-create-home --shell /sbin/nologin os-node
 install -d -m 0755 $STATE "$CONF" "$TLS"
@@ -109,7 +124,6 @@ rm -rf $API/src.old
 
 # --- lease runtime ------------------------------------------------------------
 [ -e $CONF/tunnel.lock ] || install -m 0644 /dev/null $CONF/tunnel.lock
-SB=/opt/orangespace-node/bin/sing-box
 cat > $CONF/tunnel.json <<EOF
 {"executable": "$SB", "executable_sha256": "$(sha256sum $SB | cut -d' ' -f1)",
  "certificate": "$TLS/lease.crt", "private_key": "$TLS/lease.key",

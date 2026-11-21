@@ -250,26 +250,6 @@ class DesktopTests(unittest.TestCase):
             probe.return_value = subprocess.CompletedProcess([], code)
             self.assertEqual(desktop.network_state(self.sandbox), expected)
 
-    def test_configure_uses_stdin_once_and_requires_stopped_owner(self):
-        inspect = self.patch("inspect", return_value=None)
-        secret = b'{"password":"fixture"}\n'
-        with patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as invoke:
-            reply = desktop.run("configure", self.user, self.sandbox, self.node, policy_stream=io.BytesIO(secret))
-            self.assertTrue(reply["configured"])
-            self.assertEqual(invoke.call_args.args[0], [str(desktop.NETWORK / "configure"), self.sandbox, self.node])
-            self.assertEqual(invoke.call_args.kwargs["input"], secret)
-            with self.assertRaisesRegex(desktop.DesktopError, "account"):
-                desktop.run("configure", str(uuid.uuid4()), self.sandbox, self.node, policy_stream=io.BytesIO(secret))
-            inspect.return_value = self.info
-            with self.assertRaisesRegex(desktop.DesktopError, "stop"):
-                desktop.run("configure", self.user, self.sandbox, self.node, policy_stream=io.BytesIO(secret))
-            self.assertEqual(invoke.call_count, 1)
-
-    def test_configure_rejects_oversize_before_invoking_gateway(self):
-        with patch.object(subprocess, "run") as invoke, self.assertRaisesRegex(desktop.DesktopError, "32768"):
-            desktop.configure(self.sandbox, self.node, io.BytesIO(b"x" * 32769))
-        invoke.assert_not_called()
-
     def test_lease_is_stored_and_rebuilds_only_a_running_desktop_on_its_node(self):
         inspect = self.patch("inspect", return_value=None)
         gateway = self.patch("gateway", return_value=True)

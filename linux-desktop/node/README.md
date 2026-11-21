@@ -1,12 +1,10 @@
 # 节点
 
-L3 的节点分两层，装在同一台 Rocky/RHEL 服务器上。
+节点装在一台 Rocky/RHEL 服务器上，是中心的联邦节点：只提供 TUIC 租约隧道、DNS 和节点 API，不运行桌面。
 
 | 文件 | 作用 |
 |---|---|
-| `install <TLS 名称>` | 以 root 运行。装校验过 SHA-256 的 sing-box 1.14.4、低权限用户 `os-tuic`、加固的 systemd 单元 `orangespace-tuic`，生成只留在服务器上的自签证书私钥。这是第一步用的静态 TUIC 节点（UDP 443） |
-| `make-configs` | 在操作者机器上为静态节点生成服务端配置和每个沙盒的导入文件；不打印任何凭据 |
-| `install-api <节点 uuid> <公网 IPv4> <TLS 名称> <server.tar.gz>` | 以 root 运行，需先装好 `install`。装节点 API（`server/`），作为中心的联邦节点 |
+| `install-api <节点 uuid> <公网 IPv4> <TLS 名称> <server.tar.gz>` | 以 root 运行。装校验过 SHA-256 的 sing-box 1.14.4 和节点 API（`server/`），作为中心的联邦节点 |
 | `enroll-node <中心地址>` | 以 root 运行，标准输入是中心一次性登记信息，在中心登记本节点 |
 
 ## 联邦节点（租约模式）
@@ -33,10 +31,10 @@ ssh 中心 orangespace-control-admin activate-node --alias <别名>
 ssh 中心 orangespace-control-admin grant --username <用户> --alias <别名>
 ```
 
-云安全组要放行 TCP 8443 和 UDP 20000–20015（租约隧道端口）；静态节点另需 UDP 443。
+云安全组只需放行 TCP 8443 和 UDP 20000–20015（租约隧道端口）。
 
 ## 出站限制
 
 节点只转发公网目的地址：私有地址、CGNAT 段与云元数据地址（`100.100.100.200`）一律拒绝，避免沙盒经节点读取服务器的云凭据。
 
-静态节点的沙盒导入文件经客户端（开发时用 `orangespace-wsl configure`）交给客体代理，只写入该沙盒的私有目录。出口验收用 `network/egress-check`。
+出口验收在客户端一侧用 `network/egress-check`，见 [网关说明](../network/README.md)。

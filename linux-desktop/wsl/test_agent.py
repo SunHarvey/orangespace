@@ -138,18 +138,6 @@ print(json.dumps({{"ok": sys.argv[1]}}))
             self.agent.perform({"op": "desktop.start", "user": self.user, "sandbox": self.sandbox,
                                 "node": self.node, "title": "fail"})
 
-    def test_configure_sends_settings_on_stdin_only_and_bounds_size(self):
-        settings = '{"node_id":"%s","password":"fixture-secret"}' % self.node
-        self.agent.perform({"op": "desktop.configure", "user": self.user, "sandbox": self.sandbox,
-                            "node": self.node, "settings": settings})
-        call = self.calls()[0]
-        self.assertEqual(call["args"], ["configure", self.user, self.sandbox, self.node])
-        self.assertEqual(call["stdin"], settings)
-        self.assertNotIn("fixture-secret", " ".join(call["args"]))
-        with self.assertRaisesRegex(ValueError, "32768"):
-            self.agent.perform({"op": "desktop.configure", "user": self.user, "sandbox": self.sandbox,
-                                "node": self.node, "settings": "x" * 32769})
-
     def test_lease_credentials_go_on_stdin_and_renewals_are_bounded(self):
         tunnel = str(uuid.uuid4())
         lease = '{"node_id":"%s","password":"fixture-secret","remaining_ms":20000}' % self.node

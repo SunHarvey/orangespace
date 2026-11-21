@@ -10,7 +10,6 @@ import os
 from pathlib import Path
 import secrets
 import selectors
-import shutil
 import socket
 import ssl
 import subprocess
@@ -34,7 +33,11 @@ CHUNKS = 64
 
 
 def run(*args, **kwargs):
-    return subprocess.run(args, check=True, capture_output=True, text=True, timeout=30, **kwargs)
+    result = subprocess.run(args, capture_output=True, text=True, timeout=30, **kwargs)
+    if result.returncode:
+        raise RuntimeError(f"{Path(args[0]).name} {' '.join(args[1:2])} exited {result.returncode}: "
+                           f"{result.stderr.strip()[-300:]}")
+    return result
 
 
 def finish(process):
@@ -140,11 +143,20 @@ class TestNode:
     id: str
     sandbox: str
     process: subprocess.Popen
-    record: Path
-    policy: dict
+    lease: dict
+    tunnel: str = ""
 
     def stop(self):
         finish(self.process)
+
+    def grant(self, remaining_ms=30000):
+        """Hand the sandbox a fresh node lease (what the client does), new tunnel id."""
+        self.tunnel = str(uuid.uuid4())
+        run(str(HERE / "lease"), self.sandbox, self.id,
+            input=json.dumps({**self.lease, "tunnel_id": self.tunnel, "remaining_ms": remaining_ms}))
+
+    def renew(self, remaining_ms=30000):
+        run(str(HERE / "renew"), self.sandbox, self.tunnel, str(remaining_ms))
 
 
 @dataclass
@@ -176,7 +188,6 @@ def paired_nodes(sandbox_ids):
     sandbox_ids = [gateway.uuid_text(s) for s in sandbox_ids]
     tag = secrets.token_hex(3)
     this = str(Path(__file__).resolve())
-    gateway.NODES.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     def ip(*args):
         return run("ip", *args)
@@ -237,18 +248,13 @@ def paired_nodes(sandbox_ids):
             server = tmp / (label + ".conf")
             server.write_text(json.dumps(cfg))
             node = spawn(stack, *node_prefix, "sing-box", "run", "-c", str(server))
-            node_file = gateway.NODES / (node_id + ".json")
-            policy = {"endpoint_ip": endpoint, "endpoint_port": 10443, "tls_server_name": "node.test",
-                      "certificate_pem": cert.read_text(), "ttl_seconds": 180,
-                      "bindings": {sandbox_id: {"uuid": auth, "password": password}}}
-            if label == "B":
-                del policy["ttl_seconds"]
-                policy["authorization"] = "local-persistent"
-            policy["probe"] = {"ipv4": TARGET, "port": HTTPS, "tls_name": "node.test",
-                               "path": "/ready", "certificate_pem": cert.read_text()}
-            node_file.write_text(json.dumps(policy))
-            stack.callback(node_file.unlink)
-            cases.append(TestNode(node_id, sandbox_id, node, node_file, policy))
+            lease = {"node_id": node_id, "endpoint_ip": endpoint, "endpoint_port": 10443,
+                     "tls_server_name": "node.test", "certificate_pem": cert.read_text(),
+                     "uuid": auth, "password": password,
+                     "probe": {"ipv4": TARGET, "port": HTTPS, "tls_name": "node.test",
+                               "path": "/ready", "certificate_pem": cert.read_text()}}
+            stack.callback(lambda s=sandbox_id: gateway.lease_path(s).unlink(missing_ok=True))
+            cases.append(TestNode(node_id, sandbox_id, node, lease))
         yield NodeLab(cases, tmp / "HOST", direct_baseline)
 
 
@@ -256,20 +262,9 @@ def fixture():
     with contextlib.ExitStack() as stack:
         ids = [str(uuid.uuid4()) for _ in range(2)]
         lab = stack.enter_context(paired_nodes(ids))
-        # Provision a sandbox on the persistent data disk, then invalidate its old template.
-        first = lab.nodes[0]
-        instance = gateway.INSTANCES / first.sandbox
-        gateway.INSTANCES.mkdir(mode=0o700, parents=True, exist_ok=True)
-        instance.mkdir(mode=0o700)
-        stack.callback(shutil.rmtree, instance)
-        flat = dict(first.policy)
-        credentials = flat.pop("bindings")[first.sandbox]
-        flat.update(node_id=first.id, **credentials)
-        imported = json.dumps(flat)
-        run(str(HERE / "configure"), first.sandbox, first.id, input=imported)
-        first.record.write_text(json.dumps({**first.policy, "bindings": {}}))
+        a, b = lab.nodes
         cases = []
-        for label, node in zip(("A", "B"), lab.nodes):
+        for node in lab.nodes:
             desk = "osqad" + secrets.token_hex(3)
             run("ip", "netns", "add", desk)
             stack.callback(run, "ip", "netns", "delete", desk)
@@ -277,19 +272,26 @@ def fixture():
             desktop = ["ip", "netns", "exec", desk]
             sleeper = spawn(stack, *desktop, "sleep", "600")
             stack.callback(run, str(HERE / "down"), node.sandbox)
-            cases.append((node, sleeper, desktop))
+            cases.append((sleeper, desktop))
+        (sleeper_a, desktop_a), (sleeper_b, desktop_b) = cases
+        # Without a lease there is no way out at all.
+        assert subprocess.run([str(HERE / "up"), a.sandbox, str(sleeper_a.pid), a.id]).returncode == 1
+        # A lease names its node: it cannot start the gateway toward another one.
+        a.grant()
+        assert subprocess.run([str(HERE / "up"), a.sandbox, str(sleeper_a.pid), b.id]).returncode == 1
+        b.grant()
         with ThreadPoolExecutor(max_workers=2) as pool:
             starts = [pool.submit(run, str(HERE / "up"), node.sandbox, str(sleeper.pid), node.id)
-                      for node, sleeper, _ in cases]
+                      for node, (sleeper, _) in zip(lab.nodes, cases)]
             for future in starts:
                 future.result()
-        for label, (node, _, desktop) in zip(("A", "B"), cases):
+        for label, node, desktop in (("A", a, desktop_a), ("B", b, desktop_b)):
             check(desktop, label)
             run(str(HERE / "status"), node.sandbox)
             run(str(HERE / "probe"), node.sandbox)
-        assert subprocess.run([str(HERE / "configure"), first.sandbox, first.id], input=imported,
-                              text=True, capture_output=True).returncode == 1
-        (a, _, desktop_a), (b, sleeper_b, desktop_b) = cases
+        # Losing node A cuts A only; B's long stream keeps its integrity.
+        a.renew()
+        b.renew()
         stream = spawn(stack, *desktop_b, sys.executable, __file__, "probe", "stream", "B")
         time.sleep(.25)
         a.stop()
@@ -301,54 +303,42 @@ def fixture():
         assert subprocess.run([str(HERE / "probe"), a.sandbox]).returncode == 2
         check(desktop_a, "A", blocked=True)
         check(desktop_b, "B")
-        time.sleep(gateway.WINDOW + 0.2)
-        run(str(HERE / "probe"), b.sandbox)
+        # Killing B's tunnel helper cuts B; a new lease brings it back.
+        b.renew()
         run("systemctl", "stop", gateway.Gateway(b.sandbox).unit)
         check(desktop_b, "B", blocked=True)
         run(str(HERE / "down"), b.sandbox)
+        b.grant()
         run(str(HERE / "up"), b.sandbox, str(sleeper_b.pid), b.id)
         run(str(HERE / "probe"), b.sandbox)
-        original = b.policy["bindings"].pop(b.sandbox)
-        b.record.write_text(json.dumps(b.policy))
-        time.sleep(gateway.CHECK_INTERVAL + 1)
-        check(desktop_b, "B", blocked=True)
-        run(str(HERE / "down"), b.sandbox)
-        b.policy["bindings"][b.sandbox] = original
-        # A fixed kernel allowance expires while the same healthy tunnel is still running.
-        b.policy["ttl_seconds"] = 6
-        del b.policy["authorization"]
-        b.record.write_text(json.dumps(b.policy))
-        run(str(HERE / "up"), b.sandbox, str(sleeper_b.pid), b.id)
         check(desktop_b, "B")
-        time.sleep(6.1)
-        check(desktop_b, "B", blocked=True)
-        run(str(HERE / "up"), b.sandbox, str(sleeper_b.pid), b.id)
-        check(desktop_b, "B")
-        check(desktop_a, "A", blocked=True)
-        # Node lease: each renewal extends the kernel permit; when renewals stop
-        # (client gone, node refused) it lapses on its own.
+        # Each renewal extends the kernel permit; only the current tunnel may renew.
+        down_old = b.tunnel
         run(str(HERE / "down"), b.sandbox)
-        tunnel = str(uuid.uuid4())
-        lease = {k: v for k, v in b.policy.items() if k not in ("bindings", "ttl_seconds", "authorization")}
-        lease.update(b.policy["bindings"][b.sandbox], node_id=b.id, tunnel_id=tunnel, remaining_ms=6000)
-        stack.callback(lambda: gateway.lease_path(b.sandbox).unlink(missing_ok=True))
-        run(str(HERE / "lease"), b.sandbox, b.id, input=json.dumps(lease))
+        b.grant(6000)
         run(str(HERE / "up"), b.sandbox, str(sleeper_b.pid), b.id)
         started = time.monotonic()
         while time.monotonic() - started < 8:
             check(desktop_b, "B")
-            run(str(HERE / "renew"), b.sandbox, tunnel, "6000")
+            b.renew(6000)
             time.sleep(2)
         check(desktop_b, "B")
-        assert subprocess.run([str(HERE / "renew"), b.sandbox, str(uuid.uuid4()), "6000"]).returncode == 1
+        for stale in (str(uuid.uuid4()), down_old):
+            assert subprocess.run([str(HERE / "renew"), b.sandbox, stale, "6000"]).returncode == 1
+        # When renewals stop, the kernel withdraws the permit on its own.
         time.sleep(5.6)
         check(desktop_b, "B", blocked=True)
         assert subprocess.run([str(HERE / "status"), b.sandbox]).returncode == 1
         run(str(HERE / "down"), b.sandbox)
+        # An expired lease cannot start a gateway.
+        b.grant(600)
+        time.sleep(0.3)
+        assert subprocess.run([str(HERE / "up"), b.sandbox, str(sleeper_b.pid), b.id]).returncode == 1
+        check(desktop_b, "B", blocked=True)
         lab.assert_no_direct()
-        print("PASS runtime node import and precedence, concurrent TCP/UDP/DNS egress, remote loss, local helper loss, explicit stop, "
-              "kernel expiry, persistent local reauthorization and revocation, lease renewal and lapse, sandbox HTTPS health, "
-              "sibling stream SHA-256, zero direct-canary requests")
+        print("PASS no lease no egress, lease bound to its node, concurrent TCP/UDP/DNS egress, remote loss, "
+              "local helper loss, explicit stop, lease renewal and lapse, stale tunnel refused, expired lease refused, "
+              "sandbox HTTPS health, sibling stream SHA-256, zero direct-canary requests")
 
 
 if __name__ == "__main__":

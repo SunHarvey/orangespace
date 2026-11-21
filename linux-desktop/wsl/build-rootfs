@@ -58,7 +58,7 @@ mmdebstrap --variant=minbase --arch=amd64 --include="$PACKAGES" \
   --customize-hook='sed -i "s/^# *zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/; s/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/" "$1/etc/locale.gen" && chroot "$1" locale-gen >/dev/null' \
   --customize-hook="install -m 0755 '$SINGBOX' \"\$1/usr/local/bin/sing-box\"" \
   --customize-hook="install -d -m 0755 \"\$1/etc/orangespace\" && install -m 0644 '$WORK/desktop-seccomp.json' \"\$1/etc/orangespace/desktop-seccomp.json\"" \
-  --customize-hook="mkdir -p \"\$1/opt/orangespace\" && cp -a '$SRC/bridge' '$SRC/guest' '$SRC/network' '$SRC/wsl' \"\$1/opt/orangespace/\"" \
+  --customize-hook="mkdir -p \"\$1/opt/orangespace\" && cp -a '$SRC/guest' '$SRC/network' '$SRC/wsl' \"\$1/opt/orangespace/\"" \
   --customize-hook="find \"\$1/opt/orangespace\" -name '__pycache__' -prune -exec rm -rf {} + ; echo '$REVISION' > \"\$1/opt/orangespace/REVISION\"" \
   --customize-hook='chown -R root:root "$1/opt/orangespace" && chmod -R go-w "$1/opt/orangespace"' \
   --customize-hook="chroot \"\$1\" dpkg-query -W -f='\${Package}\t\${Version}\t\${source:Package}\t\${source:Version}\n' > '$OUT.packages.tsv'" \
