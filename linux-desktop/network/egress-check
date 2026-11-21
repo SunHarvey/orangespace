@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Measures where a sandbox's traffic really goes (run as root in the OrangeSpace
+distribution while that sandbox's desktop is stopped).
+
+    egress-check <sandbox-uuid>:<node-uuid> [<sandbox-uuid>:<node-uuid> ...]
+
+Starts a throw-away container with the desktop container's network isolation
+(no network until the sandbox gateway attaches), attaches the sandbox's real
+gateway (network/up), and checks actual delivery:
+
+  egress_ip         HTTPS to a public echo service shows the bound node's IP
+  dns_via_node      a resolver-reflection query answered from the node's side
+  ipv6_blocked      no IPv6 connectivity
+  wsl_host_blocked  the WSL host (default gateway of the distribution) unreachable
+  lan_blocked       a private LAN address unreachable
+  metadata_blocked  the cloud metadata address unreachable (refused by the node)
+  sibling_blocked   the other given sandboxes' gateway links unreachable
+
+Prints one line per check and exits 0 only if all pass. Uses a tiny test image
+(localhost/orangespace/nettest:dev, built on first use).
+"""
+import json
+from pathlib import Path
+import subprocess
+import sys
+import uuid
+
+NETWORK = Path(__file__).resolve().parent
+IMAGE = "localhost/orangespace/nettest:dev"
+CONTAINERFILE = """FROM docker.io/library/debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends curl dnsutils ca-certificates iputils-ping \\
+    && rm -rf /var/lib/apt/lists/*
+"""
+
+
+def run(*args, check=True, timeout=60, stdin=None):
+    result = subprocess.run(args, input=stdin, capture_output=True, text=True, timeout=timeout)
+    if check and result.returncode:
+        raise RuntimeError(f"{args[0]} {args[1] if len(args) > 1 else ''} failed: {result.stderr.strip()[-300:]}")
+    return result
+
+
+def node_endpoint(sandbox, node):
+    path = Path("/var/lib/orangespace/desktop/instances") / sandbox / "nodes" / (node + ".json")
+    return json.loads(path.read_text())["endpoint_ip"]
+
+
+def link_addresses():
+    """IPv4 addresses of all sandbox gateway links (osw*) in the root namespace."""
+    out = run("ip", "-j", "addr", check=False).stdout or "[]"
+    prefix = "osw"
+    found = []
+    for link in json.loads(out):
+        if link.get("ifname", "").startswith(prefix):
+            for addr in link.get("addr_info", []):
+                if addr.get("family") == "inet":
+                    found.append(addr["local"])
+    return found
+
+
+def start(sandbox, node):
+    name = "osnet-" + sandbox
+    run("podman", "rm", "-f", name, check=False)
+    run("podman", "run", "-d", "--name", name, "--network=none", "--cap-drop=ALL",
+        "--security-opt=no-new-privileges", "--read-only", "--tmpfs", "/tmp",
+        "--mount", f"type=bind,src={NETWORK.parent / 'guest' / 'resolv.conf'},dst=/etc/resolv.conf,readonly",
+        IMAGE, "sleep", "900")
+    pid = run("podman", "inspect", "--format", "{{.State.Pid}}", name).stdout.strip()
+    if run(str(NETWORK / "up"), sandbox, pid, node, check=False, timeout=60).returncode:
+        raise RuntimeError(f"gateway of {sandbox} did not come up")
+    return name
+
+
+def stop(sandbox):
+    run(str(NETWORK / "down"), sandbox, check=False)
+    run("podman", "rm", "-f", "osnet-" + sandbox, check=False)
+
+
+def check(sandbox, node, siblings):
+    name = "osnet-" + sandbox
+    expected = node_endpoint(sandbox, node)
+
+    def inside(*args, timeout=20):
+        return run("podman", "exec", name, *args, check=False, timeout=timeout)
+
+    results = {}
+    ip = inside("curl", "-4", "-sS", "--max-time", "12", "https://api.ipify.org").stdout.strip()
+    results["egress_ip"] = (ip == expected, f"{ip or 'none'} (node {expected})")
+    dns = inside("dig", "+short", "+time=4", "+tries=1", "@1.1.1.1", "whoami.cloudflare", "CH", "TXT").stdout
+    dns_ip = dns.strip().strip('"')
+    results["dns_via_node"] = (dns_ip == expected, f"resolver saw {dns_ip or 'nothing'}")
+    v6 = inside("curl", "-6", "-sS", "--max-time", "6", "https://api64.ipify.org")
+    results["ipv6_blocked"] = (v6.returncode != 0, f"curl exit {v6.returncode}")
+    route = run("ip", "-4", "route", "show", "default").stdout.split()
+    host_ip = route[route.index("via") + 1] if "via" in route else "172.16.0.1"
+    host = inside("curl", "-sS", "--max-time", "5", f"http://{host_ip}/")
+    results["wsl_host_blocked"] = (host.returncode != 0, f"{host_ip}: curl exit {host.returncode}")
+    lan = inside("curl", "-sS", "--max-time", "5", "http://192.168.1.1/")
+    results["lan_blocked"] = (lan.returncode != 0, f"192.168.1.1: curl exit {lan.returncode}")
+    meta = inside("curl", "-sS", "--max-time", "6", "http://100.100.100.200/latest/meta-data/")
+    results["metadata_blocked"] = (meta.returncode != 0 or not meta.stdout.strip(),
+                                   f"curl exit {meta.returncode}, {len(meta.stdout)} bytes")
+    reached, tried = [], []
+    for addr in siblings:
+        tried.append(addr)
+        if inside("ping", "-c", "1", "-W", "2", addr).returncode == 0 or \
+                inside("curl", "-sS", "--max-time", "4", f"http://{addr}/").returncode == 0:
+            reached.append(addr)
+    results["sibling_blocked"] = (bool(tried) and not reached,
+                                  f"tried {', '.join(tried) or 'nothing'}; reached {', '.join(reached) or 'none'}")
+    return results
+
+
+def main(argv):
+    """egress-check <sandbox>:<node> [<sandbox>:<node> ...] — all are attached together,
+    so each is also checked against the others' gateway links."""
+    pairs = [a.split(":", 1) for a in argv]
+    if not pairs or any(len(p) != 2 for p in pairs):
+        print("usage: egress-check <sandbox-uuid>:<node-uuid> [<sandbox-uuid>:<node-uuid> ...]")
+        return 2
+    for sandbox, node in pairs:
+        if str(uuid.UUID(sandbox)) != sandbox or str(uuid.UUID(node)) != node:
+            raise ValueError("expected canonical UUIDs")
+    if run("podman", "image", "exists", IMAGE, check=False).returncode:
+        run("podman", "build", "--tag", IMAGE, "-f", "-", ".", stdin=CONTAINERFILE, timeout=900)
+    failed = 0
+    try:
+        before = set(link_addresses())
+        links = {}
+        for sandbox, node in pairs:
+            start(sandbox, node)
+            now = set(link_addresses())
+            links[sandbox], before = sorted(now - before), now
+        for sandbox, node in pairs:
+            siblings = [a for other, addrs in links.items() if other != sandbox for a in addrs]
+            print(f"== sandbox {sandbox}")
+            for key, (ok, detail) in check(sandbox, node, siblings).items():
+                print(f"  {key:18} {'PASS' if ok else 'FAIL'}  {detail}")
+                failed += 0 if ok else 1
+    finally:
+        for sandbox, _ in pairs:
+            stop(sandbox)
+    print("ALL PASSED" if not failed else f"FAILED ({failed})")
+    return 0 if not failed else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

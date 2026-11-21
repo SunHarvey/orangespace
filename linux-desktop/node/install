@@ -1,0 +1,49 @@
+#!/bin/sh
+# Installs a TUIC node (sing-box) with a self-signed certificate. Args: <tls name>
+set -eu
+NAME=$1
+V=1.14.4; SHA=699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968
+install -d -m 0755 /opt/orangespace-node/bin
+T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+curl -fsSL -o "$T/sb.tgz" "https://github.com/SagerNet/sing-box/releases/download/v$V/sing-box-$V-linux-amd64.tar.gz"
+echo "$SHA  $T/sb.tgz" | sha256sum -c - >/dev/null
+tar -xzf "$T/sb.tgz" -C "$T"
+install -m 0755 "$T/sing-box-$V-linux-amd64/sing-box" /opt/orangespace-node/bin/sing-box
+getent passwd os-tuic >/dev/null || useradd --system --no-create-home --shell /sbin/nologin os-tuic
+install -d -m 0750 -o root -g os-tuic /etc/orangespace-node
+if [ ! -e /etc/orangespace-node/node.key ]; then
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 825 \
+    -subj "/CN=$NAME" -addext "subjectAltName=DNS:$NAME" \
+    -keyout /etc/orangespace-node/node.key -out /etc/orangespace-node/node.crt 2>/dev/null
+  chown root:os-tuic /etc/orangespace-node/node.key /etc/orangespace-node/node.crt
+  chmod 0640 /etc/orangespace-node/node.key; chmod 0644 /etc/orangespace-node/node.crt
+fi
+cat > /etc/systemd/system/orangespace-tuic.service <<UNIT
+[Unit]
+Description=OrangeSpace TUIC node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=os-tuic
+Group=os-tuic
+ExecStart=/opt/orangespace-node/bin/sing-box run -c /etc/orangespace-node/tuic.json
+Restart=on-failure
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+/opt/orangespace-node/bin/sing-box version | head -1

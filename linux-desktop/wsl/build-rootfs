@@ -54,6 +54,7 @@ mmdebstrap --variant=minbase --arch=amd64 --include="$PACKAGES" \
   --customize-hook='echo orangespace > "$1/etc/hostname"' \
   --customize-hook="cp '$HERE/wsl.conf' \"\$1/etc/wsl.conf\"" \
   --customize-hook='chroot "$1" useradd --create-home --uid 1000 --shell /bin/bash desk' \
+  --customize-hook='printf "# Sandbox gateways route between namespaces.\nnet.ipv4.ip_forward = 1\n" > "$1/etc/sysctl.d/90-orangespace.conf"' \
   --customize-hook='sed -i "s/^# *zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/; s/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/" "$1/etc/locale.gen" && chroot "$1" locale-gen >/dev/null' \
   --customize-hook="install -m 0755 '$SINGBOX' \"\$1/usr/local/bin/sing-box\"" \
   --customize-hook="install -d -m 0755 \"\$1/etc/orangespace\" && install -m 0644 '$WORK/desktop-seccomp.json' \"\$1/etc/orangespace/desktop-seccomp.json\"" \

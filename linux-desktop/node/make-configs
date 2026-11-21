@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Development: generate TUIC credentials for a set of sandboxes and nodes.
+
+    make-configs <out-dir> <nodes.json> <bindings.json>
+
+nodes.json:    {"sg": {"ip": "203.0.113.10", "name": "node-sg.orangespace.internal", "port": 443,
+                       "cert": "path/to/sg.crt"}, ...}   (cert = the node's public certificate)
+bindings.json: {"<sandbox-uuid>": {"node": "sg", "node_id": "<node-uuid>"}, ...}
+
+Writes into <out-dir> (created 0700, files 0600):
+  <node>-tuic.json          the node's sing-box server config (all sandboxes get a user on
+                            every node, so a sandbox can be rebound without new credentials)
+  node-<sandbox-uuid>.json  the sandbox's import file for `desktop.configure`
+Nothing is printed; move the files to their destinations and delete <out-dir>.
+"""
+import json
+import os
+from pathlib import Path
+import secrets
+import sys
+import uuid
+
+
+def main(out, nodes_file, bindings_file):
+    nodes = json.loads(Path(nodes_file).read_text())
+    bindings = json.loads(Path(bindings_file).read_text())
+    os.umask(0o077)
+    out = Path(out)
+    out.mkdir(mode=0o700)
+    creds = {(n, s): {"uuid": str(uuid.uuid4()), "password": secrets.token_urlsafe(32)}
+             for n in nodes for s in bindings}
+    for n, info in nodes.items():
+        config = {
+            "log": {"level": "warn"},
+            "inbounds": [{"type": "tuic", "tag": "tuic-in", "listen": "0.0.0.0", "listen_port": info["port"],
+                          "users": [{"name": "sandbox-" + s, **creds[(n, s)]} for s in bindings],
+                          "congestion_control": "bbr",
+                          "tls": {"enabled": True, "certificate_path": "/etc/orangespace-node/node.crt",
+                                  "key_path": "/etc/orangespace-node/node.key"}}],
+            "outbounds": [{"type": "direct", "tag": "direct"}],
+            # Sandboxes must not reach the node's own networks or the cloud metadata service.
+            "route": {"rules": [{"ip_is_private": True, "action": "reject"},
+                                {"ip_cidr": ["100.64.0.0/10", "100.100.100.200/32", "169.254.0.0/16"],
+                                 "action": "reject"}],
+                      "final": "direct"}}
+        (out / f"{n}-tuic.json").write_text(json.dumps(config, indent=1))
+    for sandbox, bind in bindings.items():
+        node = nodes[bind["node"]]
+        record = {"node_id": bind["node_id"], "endpoint_ip": node["ip"], "endpoint_port": node["port"],
+                  "tls_server_name": node["name"], "authorization": "local-persistent",
+                  **creds[(bind["node"], sandbox)], "certificate_pem": Path(node["cert"]).read_text()}
+        (out / f"node-{sandbox}.json").write_text(json.dumps(record))
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 4:
+        sys.exit(__doc__.strip().splitlines()[2])
+    main(*sys.argv[1:])
