@@ -141,6 +141,7 @@ struct Engine::Worker {
   std::string tunnel;
   std::int64_t generation{0};
   int failures{0};
+  OfflineWatch offline;
 };
 
 Engine::Engine(const ns::TrustedCatalog& catalog, Centre& centre, wsl::Agent& agent, std::string probe_json,
@@ -382,7 +383,26 @@ void Engine::run(Worker& w) noexcept {
       std::lock_guard lock(mutex_);
       running = w.status.phase == Phase::running;
     }
-    if (running) refresh(w);
+    if (!running) continue;
+    refresh(w);
+    Network network;
+    {
+      std::lock_guard lock(mutex_);
+      network = w.status.phase == Phase::running ? w.status.network : Network::unknown;
+    }
+    if (w.offline.observe(network)) {
+      note(w, "no network through a valid lease; new tunnel");
+      try {
+        w.node->session.revoke_tunnel(w.tunnel);
+      } catch (const std::exception&) {
+      }
+      w.tunnel.clear();
+      {
+        std::lock_guard lock(mutex_);
+        w.deadline_ms = 0;
+      }
+      next = 0;
+    }
   }
   finish(w);
 }

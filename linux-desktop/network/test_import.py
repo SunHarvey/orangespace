@@ -94,5 +94,53 @@ class LeaseTests(unittest.TestCase):
             gateway.read_lease(self.a, self.node)
 
 
+@unittest.skipUnless(sys.platform == "linux", "CLOCK_BOOTTIME is Linux-only")
+class TunStartTests(unittest.TestCase):
+    """The desktop's routes go through the tunnel interface only once it is up."""
+
+    LO = {"ifname": "lo", "flags": ["LOOPBACK", "UP", "LOWER_UP"]}
+    DOWN = {"ifname": "ostun0", "flags": ["POINTOPOINT", "MULTICAST", "NOARP"]}
+    UP = {"ifname": "ostun0", "flags": ["POINTOPOINT", "MULTICAST", "NOARP", "UP", "LOWER_UP"]}
+
+    def connect(self, listings):
+        state = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(patch.object(gateway, "STATE", state))
+        self.enterContext(patch.object(gateway, "TUN_START_SECONDS", 0.5))
+        self.enterContext(patch.object(gateway, "service_property", return_value="active"))
+        self.enterContext(patch.object(gateway.shutil, "which", side_effect=lambda name: "/usr/bin/" + name))
+        self.enterContext(patch.object(gateway.Gateway, "ready", return_value=True))
+        calls, shown = [], []
+        remaining = iter(listings)
+
+        def run(*args, stdin=None):
+            calls.append(args)
+            if args[-3:] == ("-j", "link", "show"):
+                shown.append(len(calls) - 1)
+                return json.dumps(next(remaining, listings[-1]))
+            return ""
+
+        self.enterContext(patch.object(gateway, "run", side_effect=run))
+        g = gateway.Gateway(str(uuid4()))
+        data = {"slot": 1, "node": str(uuid4()), "tunnel": str(uuid4()), "endpoint": "203.0.113.12",
+                "port": 20000, "probe": None, "ready_until": 0}
+        outbound = {"type": "tuic", "tag": "bound-node", "server": "203.0.113.12", "server_port": 20000}
+        return g, calls, shown, lambda: g.connect(data, outbound, 20)
+
+    def test_routes_wait_until_the_interface_is_up(self):
+        g, calls, shown, connect = self.connect([[self.LO], [self.LO, self.DOWN], [self.LO, self.DOWN],
+                                                 [self.LO, self.UP]])
+        connect()
+        route = calls.index(("ip", "-n", g.ns, "route", "add", "default", "dev", "ostun0",
+                             "metric", "10", "table", "100"))
+        self.assertEqual(len(shown), 4)
+        self.assertGreater(route, shown[-1])
+
+    def test_an_interface_that_never_comes_up_fails_the_start(self):
+        g, calls, shown, connect = self.connect([[self.LO, self.DOWN]])
+        with self.assertRaisesRegex(gateway.GatewayError, "did not start"):
+            connect()
+        self.assertFalse(any("ostun0" in c and "route" in c for c in calls))
+
+
 if __name__ == "__main__":
     unittest.main()

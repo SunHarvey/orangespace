@@ -393,8 +393,10 @@ class Gateway:
         # itself can take a large share of the budget.
         deadline = time.monotonic() + TUN_START_SECONDS
         while True:
+            # sing-box creates the interface before it brings it up; a route via
+            # an interface that is still down fails ("nexthop is not up").
             links = json.loads(run(*gw, "-j", "link", "show"))
-            if any(link["ifname"] == "ostun0" for link in links):
+            if any(link["ifname"] == "ostun0" and "UP" in link.get("flags", ()) for link in links):
                 break
             if service_property(self.unit, "ActiveState") != "active":
                 raise GatewayError("tunnel process stopped during startup")

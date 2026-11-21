@@ -3,6 +3,7 @@
 // the window turns it into text. Nothing here claims more than was observed:
 // the network column is what the guest's gateway reported last, and a lapsed
 // lease means no network (there is no direct path to fall back to).
+#include <algorithm>
 #include <cstdint>
 #include <string>
 
@@ -27,6 +28,33 @@ inline Network network_from_guest(const std::string& value) {
   return Network::unknown;
 }
 
+// A running desktop whose gateway keeps reporting no network although its lease
+// is valid (the gateway failed to start, or its tunnel process died) gets a new
+// tunnel; the guest rebuilds the gateway when the new lease arrives. Fed one
+// status per renewal (every 10 s). Each rebuild that does not help doubles the
+// wait, up to 30 reports, so a node that is down is not asked for a tunnel
+// every few seconds. No answer from the guest is no evidence either way.
+class OfflineWatch {
+ public:
+  static constexpr int kFirst = 3, kMost = 30;
+  // True when the tunnel should be rebuilt now.
+  bool observe(Network n) {
+    if (n == Network::unknown) return false;
+    if (n != Network::offline) {
+      count_ = 0;
+      limit_ = kFirst;
+      return false;
+    }
+    if (++count_ < limit_) return false;
+    count_ = 0;
+    limit_ = (std::min)(limit_ * 2, kMost);
+    return true;
+  }
+
+ private:
+  int count_{0}, limit_{kFirst};
+};
+
 inline bool active(Phase p) { return p == Phase::starting || p == Phase::running; }
 
 inline std::string desktop_label(const Status& s) {
@@ -35,7 +63,7 @@ inline std::string desktop_label(const Status& s) {
     case Phase::starting: return "正在启动";
     case Phase::running: return s.window_open ? "运行中" : "运行中（窗口已关闭）";
     case Phase::stopping: return "正在停止";
-    case Phase::failed: return "启动失败";
+    case Phase::failed: return "出错停止";  // failed to start, or stopped on its own; the hint says which
     case Phase::deleting: return "正在删除";
   }
   return "未知";

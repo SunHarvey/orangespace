@@ -115,7 +115,7 @@ void status_never_claims_more_than_observed() {
   s.window_open = false;
   assert(sb::desktop_label(s) == "运行中（窗口已关闭）");
   s.phase = sb::Phase::failed;
-  assert(sb::desktop_label(s) == "启动失败" && sb::network_label(s) == "—");
+  assert(sb::desktop_label(s) == "出错停止" && sb::network_label(s) == "—");
 }
 
 void base64_round_trips_and_rejects_anything_loose() {
@@ -134,6 +134,36 @@ void base64_round_trips_and_rejects_anything_loose() {
   // One full chunk fits in an agent frame with room for the JSON around it.
   assert(b64::encode(std::string(sb::kChunk, 'x')).size() + 256 <= 65536);
 }
+
+// Reports needed (offline in a row) before observe() asks for a rebuild.
+int reports_until_rebuild(sb::OfflineWatch& w) {
+  for (int n = 1; n <= 1000; ++n)
+    if (w.observe(sb::Network::offline)) return n;
+  return -1;
+}
+
+void a_gateway_offline_through_a_valid_lease_gets_a_new_tunnel_with_backoff() {
+  sb::OfflineWatch w;
+  assert(reports_until_rebuild(w) == 3);
+  assert(reports_until_rebuild(w) == 6);   // the rebuild did not help: wait longer
+  assert(reports_until_rebuild(w) == 12);
+  assert(reports_until_rebuild(w) == 24);
+  assert(reports_until_rebuild(w) == 30);  // capped
+  assert(reports_until_rebuild(w) == 30);
+  // Any report of a working gateway starts over.
+  for (auto good : {sb::Network::gateway_ready, sb::Network::online}) {
+    sb::OfflineWatch v;
+    (void)reports_until_rebuild(v);
+    assert(!v.observe(sb::Network::offline));
+    assert(!v.observe(good));
+    assert(reports_until_rebuild(v) == 3);
+  }
+  // No answer from the guest neither counts nor resets.
+  sb::OfflineWatch u;
+  assert(!u.observe(sb::Network::offline) && !u.observe(sb::Network::offline));
+  for (int i = 0; i < 10; ++i) assert(!u.observe(sb::Network::unknown));
+  assert(u.observe(sb::Network::offline));
+}
 }  // namespace
 
 int main() {
@@ -144,6 +174,7 @@ int main() {
   the_list_is_bounded();
   status_never_claims_more_than_observed();
   base64_round_trips_and_rejects_anything_loose();
+  a_gateway_offline_through_a_valid_lease_gets_a_new_tunnel_with_backoff();
   std::puts("sandbox model tests passed");
   return 0;
 }
