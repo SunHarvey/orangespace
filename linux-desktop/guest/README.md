@@ -27,7 +27,18 @@ desktop start     USER_UUID SANDBOX_UUID NODE_UUID TITLE
 desktop status    USER_UUID SANDBOX_UUID
 desktop stop      USER_UUID SANDBOX_UUID
 desktop delete    USER_UUID SANDBOX_UUID
+desktop files-list USER_UUID SANDBOX_UUID
+desktop files-put  USER_UUID SANDBOX_UUID NAME SIZE  < 文件内容
+desktop files-get  USER_UUID SANDBOX_UUID NAME       > {"size":N} 一行 + 文件内容
 ```
+
+**下载文件夹**（`files-*`，供客户端的“文件”窗口经代理与节点互传）
+
+- 只操作该沙盒 HOME 下的 `Downloads`，只接受不含路径的普通文件名。
+- 以 root 打开 HOME（`O_NOFOLLOW`），随即放弃 root，改用该沙盒的宿主 UID 读写；之后的一切文件操作都以沙盒自己的身份进行，替换成符号链接也无法越出。
+- 写入先落到隐藏的临时文件，收满声明的大小后用硬链接发布到空闲的名字（已有同名文件时为“名称 (1).ext”），从不覆盖已有文件。
+- 读取拒绝符号链接与非普通文件。列表跳过隐藏文件、未下载完的 `.crdownload` / `.part` 和非普通文件，最多 1000 项。
+- 沙盒从未打开过（没有所有者或桌面数据）时拒绝。
 
 **命令与输入**
 

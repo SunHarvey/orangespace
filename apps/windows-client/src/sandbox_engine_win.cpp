@@ -104,6 +104,11 @@ ps::ExchangeTicket Centre::issue(std::string_view node_id) {
   return session_.issue(node_id);
 }
 
+ps::SerializedSecret Centre::envelope() const {
+  std::lock_guard lock(mutex_);
+  return session_.export_envelope();
+}
+
 void Centre::logout() {
   std::lock_guard lock(mutex_);
   session_.logout();

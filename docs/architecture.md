@@ -11,7 +11,7 @@
 ```mermaid
 flowchart LR
   subgraph W["用户的 Windows 电脑"]
-    C["OrangeSpace 客户端（C++）<br/>中心登录、沙盒列表、节点租约、节点文件面板"]
+    C["OrangeSpace 客户端（C++）<br/>中心登录、沙盒列表、节点租约、每个沙盒的文件窗口"]
     subgraph V["WSL2 发行版 OrangeSpace（Debian 13）"]
       AG["客体管理代理（root）"]
       subgraph SA["沙盒 A"]
@@ -36,7 +36,7 @@ flowchart LR
 
 ## Windows 客户端
 
-- 负责中心登录、授权节点、沙盒的创建/绑定/打开/停止/删除、节点租约的创建与续租、节点个人文件面板。凭据用当前用户的 DPAPI 保存。不使用 LocalSystem 服务。
+- 负责中心登录、授权节点、沙盒的创建/绑定/打开/停止/删除、节点租约的创建与续租、节点个人文件与沙盒“下载”之间的传送。凭据用当前用户的 DPAPI 保存。不使用 LocalSystem 服务。
 - 管理 WSL 发行版 `OrangeSpace`：检查 WSL 可用，首次运行用 `wsl --import` 导入，**从用户的交互会话中启动**（WSLg 只连接最先启动 WSL 的会话），常驻一个 `wsl.exe` 控制进程（否则发行版会被自动停止），退出时正常关闭。
 - 控制通道是客户端启动的 `wsl.exe -d OrangeSpace -u root -- python3 /opt/orangespace/wsl/agent.py` 子进程的标准输入/输出（`linux-desktop/wsl/agent.py`、`apps/windows-client/include/orangespace/wsl_channel.hpp`）。管道只属于客户端进程，持有管道即认证；不开端口、不建命名管道。代理先输出同步标记，客户端跳过 wsl.exe 可能打印的提示后再按帧（类型、编号、长度，载荷不超过 64 KiB）收发 JSON 请求与回复。
 
@@ -55,7 +55,7 @@ flowchart LR
 | 显示 | 每沙盒一个常驻虚拟显示（Xvnc），不依赖 WSLg 和远程桌面连接；以本沙盒专用账户运行，无网络、看不到 `/mnt`、不开 TCP。容器只挂载本沙盒的 X socket 与 Xauthority cookie，**不得访问 WSLg 公共显示 `:0`**。Windows 窗口是查看器（vncviewer，WSLg 客户端），经容器看不到的私有 Unix socket 连到虚拟显示，标题含沙盒名；关窗不停桌面，再次打开即重连，WSLg 重启后自动恢复 |
 | 输入法 | Windows 输入法传不进 Linux 窗口。每个沙盒会话内运行 fcitx5 拼音，默认开启，左 Shift 切换中英（Ctrl+空格 常被客户端操作系统截走） |
 | 剪贴板 | 默认隔离：沙盒与 Windows、沙盒与沙盒都不互通。虚拟显示与查看器两端都关闭剪贴板传送，查看器菜单关闭 |
-| 文件 | 文件管理器管理本沙盒 HOME。节点个人文件由客户端文件面板管理，可经代理在"节点文件 ↔ 本沙盒下载目录"之间传送 |
+| 文件 | 文件管理器管理本沙盒 HOME。节点个人文件在客户端每个沙盒的"文件"窗口里浏览，可在"节点文件 ↔ 本沙盒下载目录"之间互传 |
 
 ## 网络：全流量走节点
 
@@ -72,6 +72,8 @@ flowchart LR
 ## 文件
 
 Linux 节点文件路径为服务目录下的 `<认证用户 UUID>/<相对路径>`。用户身份来自 token，不能由 API 路径或请求体指定。同用户同节点的多个沙盒共享个人区；不同节点不自动同步。服务以非 root 账号运行，目录 0700，描述符相对访问，拒绝 symlink 和特殊文件。文件任务创建时固定 node_id，切换节点不改写历史任务归属。
+
+沙盒与节点之间的传送由客户端中转：节点一侧用该沙盒绑定节点换来的、只含文件权限的节点会话；沙盒一侧经客体代理，以该沙盒自己的 UID 读写它 HOME 下的 `Downloads`。中转文件放在当前 Windows 用户的私有目录 `%LOCALAPPDATA%\OrangeSpace\users\<中心用户 UUID>\transfer`，传完即删，登录时清空残留。两边都不覆盖：沙盒一侧取空闲的名字，节点一侧遇到同名文件拒绝。容器本身仍然拿不到节点凭据，也看不到 Windows 磁盘。
 
 ## 清理
 

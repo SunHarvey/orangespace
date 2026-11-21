@@ -1,4 +1,5 @@
 #pragma once
+#include "orangespace/node_session.hpp"
 #include "orangespace/platform_session.hpp"
 #include <atomic>
 #include <filesystem>
@@ -7,25 +8,27 @@
 namespace orangespace::files {
 namespace ps = platform_session;
 struct FileContext {
-  std::string central_user_id, sandbox_id, node_id, username, node_name;
+  std::string central_user_id, sandbox_id, node_id;
   std::shared_ptr<const ps::PlatformConfig> platform;
-  std::shared_ptr<ps::Session> session; // Compatibility only; never read by FileClient.
+  std::shared_ptr<const node_session::TrustedCatalog> catalog;  // administrator-protected node pins
   std::shared_ptr<const ps::SerializedSecret> central_envelope;
 };
 struct Entry {
   std::string name, path;
   bool is_directory{};
   std::uint64_t size{};
-  std::optional<std::int64_t> modified_at_ns;
+  // Whole seconds, for display only: the node sends nanoseconds, which a JSON
+  // double holds to within 256 ns, so a value may land one second late.
+  std::optional<std::int64_t> modified_s;
 };
 using Progress = std::function<void(std::uint64_t, std::uint64_t)>;
 class Cancelled final : public std::runtime_error {
  public: Cancelled() : std::runtime_error("file operation cancelled") {}
 };
-// The caller snapshots central_envelope under its existing Session owner gate
-// before spawning work. FileClient NEVER reads the compatibility session field.
-// It restores a private central Session and never logs out the shared token.
-// Catalog is the administrator-protected nodes.json beside the executable.
+// The caller exports central_envelope from its Centre session before spawning
+// work. FileClient restores a private Centre session from it and never logs
+// out the shared token. Every operation revalidates the Centre session and the
+// node binding, then exchanges a fresh node credential for the file scope.
 // App-private roots use the streaming Rust ABI, never the capped JSON ABI or
 // WinHTTP trust-ignore flags. Ordinary OS-trusted HTTPS uses strict WinHTTP.
 class FileClient {

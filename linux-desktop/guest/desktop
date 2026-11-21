@@ -24,6 +24,15 @@ Called by the guest agent (wsl/agent.py). One sandbox =
   desktop lease     USER SANDBOX NODE   < lease.json
   desktop renew     USER SANDBOX TUNNEL REMAINING_MS
   desktop delete    USER SANDBOX        (removes the sandbox's local data)
+  desktop files-list USER SANDBOX              (regular files in ~/Downloads)
+  desktop files-put  USER SANDBOX NAME SIZE    < exactly SIZE bytes
+  desktop files-get  USER SANDBOX NAME         > {"size":N} line, then N bytes
+
+The files-* operations move node files to and from the sandbox's Downloads
+directory for the client. They open the sandbox's HOME as root and then drop
+to the sandbox's own UID before touching anything in it, so whatever the
+sandbox placed there (symlinks, links, special files) reaches nothing that
+the sandbox itself could not.
 
 Prints one JSON object.
 """
@@ -59,6 +68,10 @@ UID_BASE, UID_BLOCK, MAX_SLOTS = 200000, 65536, 64
 DISPLAY_BASE = 100               # X display number = DISPLAY_BASE + slot
 SCREEN = "1440x900"
 MAX_POLICY_BYTES = 32768
+DOWNLOADS = "Downloads"
+MAX_LISTED = 1000
+COPY_CHUNK = 1 << 16
+HIDDEN_SUFFIXES = (".crdownload", ".part")   # downloads still in progress
 
 
 class DesktopError(Exception):
@@ -456,6 +469,149 @@ def describe(user, sandbox, info):
             "network": network_state(sandbox) if running else "offline"}
 
 
+def file_name(value):
+    """One visible path component: no separators, control characters or dot names."""
+    if (not value or value.startswith(".") or "/" in value or len(value.encode("utf-8")) > 255
+            or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+        raise DesktopError("invalid file name")
+    return value
+
+
+def downloads(user, sandbox):
+    """This sandbox's Downloads directory, opened as the sandbox's own UID.
+
+    Only the HOME directory is opened as root (its parents belong to root, so
+    it cannot be redirected); the process then gives up root for good."""
+    with ownership(user, sandbox, claim=False) as directory:
+        if not (directory / "owner").exists() or not (directory / "slot").exists():
+            raise DesktopError("this sandbox has no desktop data yet; open it once first")
+        uid = host_uid(slot_of(directory))
+        home = os.open(directory / "home", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    os.setgroups([])
+    os.setresgid(uid, uid, uid)
+    os.setresuid(uid, uid, uid)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        return os.open(DOWNLOADS, flags, dir_fd=home)
+    except FileNotFoundError:
+        os.mkdir(DOWNLOADS, 0o700, dir_fd=home)
+        return os.open(DOWNLOADS, flags, dir_fd=home)
+    except OSError:
+        raise DesktopError("the Downloads folder is not a directory") from None
+    finally:
+        os.close(home)
+
+
+def list_files(folder):
+    files = []
+    with os.scandir(folder) as entries:
+        for entry in entries:
+            name = entry.name
+            if name.startswith(".") or name.endswith(HIDDEN_SUFFIXES):
+                continue
+            try:
+                name.encode("utf-8")
+                info = entry.stat(follow_symlinks=False)
+            except (UnicodeEncodeError, OSError):
+                continue
+            if stat.S_ISREG(info.st_mode):
+                files.append({"name": name, "size": info.st_size, "modified_ns": info.st_mtime_ns})
+    files.sort(key=lambda f: f["name"])
+    return files[:MAX_LISTED]
+
+
+def free_name(folder, name):
+    """name, or "name (1).ext", "name (2).ext", ... : never replaces a file."""
+    stem, dot, extension = name.rpartition(".")
+    if not stem:
+        stem, dot, extension = name, "", ""
+    for n in range(1000):
+        candidate = name if n == 0 else f"{stem} ({n}){dot}{extension}"
+        if len(candidate.encode("utf-8")) > 255:
+            continue
+        try:
+            os.stat(candidate, dir_fd=folder, follow_symlinks=False)
+        except FileNotFoundError:
+            yield candidate
+    raise DesktopError("too many files with this name")
+
+
+def put_file(folder, name, size, stream):
+    temp = "." + uuid.uuid4().hex + ".part"
+    out = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                  dir_fd=folder)
+    try:
+        try:
+            remaining = size
+            while remaining:
+                chunk = stream.read(min(COPY_CHUNK, remaining))
+                if not chunk:
+                    raise DesktopError("the transfer ended early")
+                view = memoryview(chunk)
+                while view:
+                    view = view[os.write(out, view):]
+                remaining -= len(chunk)
+            if stream.read(1):
+                raise DesktopError("more data than announced")
+            os.fsync(out)
+        finally:
+            os.close(out)
+        for candidate in free_name(folder, name):
+            try:
+                # linkat without following: publishes the finished file under a free name.
+                os.link(temp, candidate, src_dir_fd=folder, dst_dir_fd=folder, follow_symlinks=False)
+                return candidate
+            except FileExistsError:
+                continue
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(temp, dir_fd=folder)
+
+
+def get_file(folder, name, out):
+    source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=folder)
+    try:
+        info = os.fstat(source)
+        if not stat.S_ISREG(info.st_mode):
+            raise DesktopError("not a regular file")
+        out.write(json.dumps({"size": info.st_size}).encode() + b"\n")
+        try:
+            remaining = info.st_size
+            while remaining:
+                chunk = os.read(source, min(COPY_CHUNK, remaining))
+                if not chunk:
+                    raise DesktopError("the file changed while it was read")
+                out.write(chunk)
+                remaining -= len(chunk)
+            out.flush()
+        except (DesktopError, OSError):
+            # Past the header every stdout byte is file data: fail by exit status alone.
+            os._exit(1)
+    finally:
+        os.close(source)
+
+
+def files(op, user, sandbox, args):
+    user, sandbox = identifier(user), identifier(sandbox)
+    if op == "files-list" and not args:
+        folder = downloads(user, sandbox)
+        return {"user_id": user, "sandbox_id": sandbox, "files": list_files(folder)}
+    if op == "files-put" and len(args) == 2:
+        name, size = file_name(args[0]), args[1]
+        if not size.isdecimal() or int(size) > 1 << 40:
+            raise DesktopError("invalid file size")
+        folder = downloads(user, sandbox)
+        return {"user_id": user, "sandbox_id": sandbox, "name": put_file(folder, name, int(size), sys.stdin.buffer),
+                "size": int(size)}
+    if op == "files-get" and len(args) == 1:
+        name = file_name(args[0])
+        folder = downloads(user, sandbox)
+        get_file(folder, name, sys.stdout.buffer)
+        return None
+    raise ValueError("usage: desktop files-list USER SANDBOX | files-put USER SANDBOX NAME SIZE |"
+                     " files-get USER SANDBOX NAME")
+
+
 def run(op, user, sandbox, node=None, title=None, policy_stream=None, remaining_ms=None):
     user, sandbox = identifier(user), identifier(sandbox)
     if op in ("start", "lease"):
@@ -502,7 +658,11 @@ def main(args):
         if os.geteuid() != 0:
             raise DesktopError("root is required")
         os.umask(0o077)
-        if len(args) == 5 and args[0] == "start":
+        if args and args[0].startswith("files-") and len(args) >= 3:
+            result = files(args[0], args[1], args[2], args[3:])
+            if result is None:
+                return 0
+        elif len(args) == 5 and args[0] == "start":
             result = run("start", args[1], args[2], args[3], args[4])
         elif len(args) == 4 and args[0] == "lease":
             result = run(args[0], args[1], args[2], args[3])

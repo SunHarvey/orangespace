@@ -306,5 +306,114 @@ class DesktopTests(unittest.TestCase):
             desktop.run("renew", str(uuid.uuid4()), self.sandbox, tunnel, remaining_ms="20000")
 
 
+
+BOOT = """
+import importlib.machinery, importlib.util, sys
+from pathlib import Path
+loader = importlib.machinery.SourceFileLoader("desktop", sys.argv[1])
+spec = importlib.util.spec_from_loader(loader.name, loader)
+desktop = importlib.util.module_from_spec(spec)
+loader.exec_module(desktop)
+desktop.ROOT = Path(sys.argv[2])
+sys.exit(desktop.main(sys.argv[3:]))
+"""
+
+
+@unittest.skipUnless(hasattr(__import__("os"), "geteuid") and __import__("os").geteuid() == 0,
+                     "needs root: the file operations really drop to the sandbox's UID")
+class SandboxFilesTests(unittest.TestCase):
+    """files-list/put/get run as the sandbox's own UID inside its Downloads folder."""
+
+    SLOT = 63
+
+    def setUp(self):
+        import os
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name) / "state"
+        self.user, self.sandbox = str(uuid.uuid4()), str(uuid.uuid4())
+        self.uid = desktop.host_uid(self.SLOT)
+        instance = self.state / "instances" / self.sandbox
+        instance.mkdir(parents=True, mode=0o700)
+        (self.state / "locks").mkdir(mode=0o700)
+        (instance / "owner").write_text(self.user + "\n")
+        (instance / "slot").write_text(f"{self.SLOT}\n")
+        self.home = instance / "home"
+        self.home.mkdir(mode=0o700)
+        os.chown(self.home, self.uid, self.uid)
+        self.downloads = self.home / "Downloads"
+
+    def run_files(self, *args, data=b"", user=None):
+        proc = subprocess.run([__import__("sys").executable, "-c", BOOT, str(Path(__file__).with_name("desktop")),
+                               str(self.state), args[0], user or self.user, self.sandbox, *args[1:]],
+                              input=data, capture_output=True, timeout=30)
+        return proc.returncode, proc.stdout
+
+    def json_of(self, *args, **kwargs):
+        import json
+        code, out = self.run_files(*args, **kwargs)
+        return code, json.loads(out)
+
+    def test_round_trip_creates_files_owned_by_the_sandbox_and_never_replaces(self):
+        import json, os
+        code, result = self.json_of("files-put", "报告.txt", "5", data=b"hello")
+        self.assertEqual((code, result["name"]), (0, "报告.txt"))
+        info = os.stat(self.downloads / "报告.txt")
+        self.assertEqual((info.st_uid, info.st_gid, info.st_mode & 0o777), (self.uid, self.uid, 0o600))
+        self.assertEqual(os.stat(self.downloads).st_uid, self.uid)  # created on first use, as the sandbox
+        code, result = self.json_of("files-put", "报告.txt", "3", data=b"two")
+        self.assertEqual(result["name"], "报告 (1).txt")
+        self.assertEqual((self.downloads / "报告.txt").read_bytes(), b"hello")
+        (self.downloads / "half.crdownload").write_bytes(b"x")
+        (self.downloads / ".hidden").write_bytes(b"x")
+        (self.downloads / "folder").mkdir()
+        code, listing = self.json_of("files-list")
+        self.assertEqual([f["name"] for f in listing["files"]], ["报告 (1).txt", "报告.txt"])
+        code, out = self.run_files("files-get", "报告 (1).txt")
+        header, body = out.split(b"\n", 1)
+        self.assertEqual((code, json.loads(header), body), (0, {"size": 3}, b"two"))
+
+    def test_short_or_long_input_publishes_nothing(self):
+        import os
+        for data in (b"abc", b"abcdefgh"):
+            code, result = self.json_of("files-put", "a.bin", "5", data=data)
+            self.assertEqual(code, 1)
+            self.assertIn("error", result)
+        self.assertEqual(os.listdir(self.downloads), [])
+
+    def test_links_and_files_the_sandbox_cannot_read_stay_out_of_reach(self):
+        import os
+        self.downloads.mkdir()
+        os.chown(self.downloads, self.uid, self.uid)
+        secret = Path(self.tmp.name) / "root-only"
+        secret.write_bytes(b"secret")
+        secret.chmod(0o600)
+        os.symlink(secret, self.downloads / "link")
+        os.link(secret, self.downloads / "hard")          # a root-owned file inside Downloads
+        for name in ("link", "hard"):
+            code, out = self.run_files("files-get", name)
+            self.assertEqual(code, 1, name)
+            self.assertNotIn(b"secret", out)
+        code, listing = self.json_of("files-list")
+        self.assertEqual([f["name"] for f in listing["files"]], ["hard"])  # listed, but not readable
+
+    def test_a_redirected_downloads_folder_is_refused(self):
+        import os
+        target = Path(self.tmp.name) / "elsewhere"
+        target.mkdir()
+        os.symlink(target, self.downloads)
+        code, result = self.json_of("files-put", "a", "1", data=b"x")
+        self.assertEqual(code, 1)
+        self.assertEqual(os.listdir(target), [])
+
+    def test_names_and_owners_are_checked_before_any_io(self):
+        for name in ("../x", "a/b", ".hidden", "", "x" * 256, "a\nb"):
+            code, result = self.json_of("files-put", name, "1", data=b"x")
+            self.assertEqual(code, 1, name)
+        code, result = self.json_of("files-list", user=str(uuid.uuid4()))
+        self.assertIn("another account", result["error"])
+        self.assertFalse(self.downloads.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,6 @@
 // Portable behaviour of the sandbox list on this computer and of what the
 // window shows for each sandbox.
+#include "orangespace/sandbox_files.hpp"
 #include "orangespace/sandbox_status.hpp"
 #include "orangespace/sandbox_store.hpp"
 
@@ -116,6 +117,23 @@ void status_never_claims_more_than_observed() {
   s.phase = sb::Phase::failed;
   assert(sb::desktop_label(s) == "启动失败" && sb::network_label(s) == "—");
 }
+
+void base64_round_trips_and_rejects_anything_loose() {
+  namespace b64 = sb::base64;
+  assert(b64::encode("") == "" && b64::encode("f") == "Zg==" && b64::encode("fo") == "Zm8=" &&
+         b64::encode("foo") == "Zm9v" && b64::encode("foobar") == "Zm9vYmFy");
+  std::string all;
+  for (int i = 0; i < 256; ++i) all += static_cast<char>(i);
+  for (std::size_t n = 0; n <= all.size(); ++n) {
+    std::string back;
+    assert(b64::decode(b64::encode(all.substr(0, n)), back) && back == all.substr(0, n));
+  }
+  std::string out;
+  for (const char* bad : {"Zg=", "Zg", "Z===", "Zh==", "Zm9=", "Zm 9v", "Zm9v\n", "=Zm9", "Zg==Zg==", "Zm9-"})
+    assert(!b64::decode(bad, out));
+  // One full chunk fits in an agent frame with room for the JSON around it.
+  assert(b64::encode(std::string(sb::kChunk, 'x')).size() + 256 <= 65536);
+}
 }  // namespace
 
 int main() {
@@ -125,6 +143,7 @@ int main() {
   a_sandbox_keeps_one_node_until_rebound();
   the_list_is_bounded();
   status_never_claims_more_than_observed();
+  base64_round_trips_and_rejects_anything_loose();
   std::puts("sandbox model tests passed");
   return 0;
 }

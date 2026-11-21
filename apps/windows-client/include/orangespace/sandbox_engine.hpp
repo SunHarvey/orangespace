@@ -36,6 +36,9 @@ class Centre {
   platform_session::CentralIdentity identity() const;
   std::vector<platform_session::NodeRef> nodes();
   platform_session::ExchangeTicket issue(std::string_view node_id);  // revalidates first
+  // The session in exportable form, for work that restores its own copy (node
+  // file transfers). Holders must never log it out.
+  platform_session::SerializedSecret envelope() const;
   void logout();
 
  private:

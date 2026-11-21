@@ -17,8 +17,7 @@ std::vector<Entry> parse_listing(std::string_view body,const TaskScope& task){
  nd::require(nd::text(nd::field(d.value,"node_id"))==task.node_id&&nd::text(nd::field(d.value,"path"))==task.path);
  auto a=std::get_if<json::Value::Array>(&nd::field(d.value,"entries").data);nd::require(a);std::vector<Entry> result;
  for(const auto& v:*a){Entry e;e.name=nd::text(nd::field(v,"name"));nd::require(checked_path(e.name)==e.name&&e.name.find('/')==e.name.npos);e.path=task.path.empty()?e.name:task.path+"/"+e.name;checked_path(e.path);auto kind=nd::text(nd::field(v,"kind"));nd::require(kind=="directory"||kind=="file");e.is_directory=kind=="directory";if(!e.is_directory)e.size=static_cast<std::uint64_t>(nd::integer(nd::field(v,"size"),0));
- // Nanosecond metadata exceeds the shared DOM exact integer range. Omit it
- // explicitly rather than fabricate a rounded timestamp.
+ if(const auto* m=v.find("modified_at_ns"))if(const auto* ns=std::get_if<double>(&m->data);ns&&*ns>=0&&*ns<9.2e18)e.modified_s=static_cast<std::int64_t>(*ns/1e9);
  result.push_back(std::move(e));}return result;
 }
 std::string checked_path(std::string_view p, bool root) {
@@ -68,7 +67,6 @@ std::wstring wide(std::string_view s){return {s.begin(),s.end()};}
 std::string quote(std::string_view s){return node_federation::quote(s);}
 std::int64_t now(){return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();}
 void exchange_body(Secret& b,const ps::ExchangeTicket& t){nd::require(nd::uuid(t.exchange_id));nd::validate_token(t.exchange_token.view());b.value.reserve(256);b.value="{\"schema\":1,\"exchange_id\":\"";b.value+=t.exchange_id;b.value+="\",\"exchange_token\":\"";b.value.append(t.exchange_token.view());b.value+="\"}";}
-std::wstring catalog_path(){std::array<wchar_t,32768> b{};auto n=GetModuleFileNameW(nullptr,b.data(),static_cast<DWORD>(b.size()));nd::require(n && n<b.size());std::wstring p(b.data(),n);return p.substr(0,p.find_last_of(L'\\')+1)+L"nodes.json";}
 std::string header(HINTERNET r,DWORD type,const wchar_t* name) {
  std::array<wchar_t,256>b{};DWORD n=sizeof(b),i=0;check(WinHttpQueryHeaders(r,type,name,b.data(),&n,&i));std::string out;
  for(DWORD j=0;j<n/sizeof(wchar_t);++j){nd::require(b[j]>=32&&b[j]<=126);out+=static_cast<char>(b[j]);}
@@ -143,7 +141,7 @@ std::string metadata(const nd::NodeEntry& node,std::string_view method,std::stri
 struct FileClient::Impl {
  const FileContext context;std::mutex mutex;std::unique_ptr<ps::Session> central;
  std::shared_ptr<const node_session::TrustedCatalog> catalog;ps::NodeRef selected;nd::NodeEntry node;
- explicit Impl(const FileContext& c):context(c){detail::TaskScope scope(c,"",true);nd::require(c.platform&&c.central_envelope);central.reset(new ps::Session(ps::Session::restore(*c.platform,c.central_envelope->view())));nd::require(central->identity().central_user_id==c.central_user_id);catalog=std::make_shared<node_session::TrustedCatalog>(node_session::TrustedCatalog::load(catalog_path()));auto all=central->nodes();auto f=std::find_if(all.begin(),all.end(),[&](const auto& n){return n.node_id==c.node_id;});nd::require(f!=all.end());selected=*f;node=catalog->federation_node(c.node_id);pp::match_catalog(selected,node);
+ explicit Impl(const FileContext& c):context(c){detail::TaskScope scope(c,"",true);nd::require(c.platform&&c.catalog&&c.central_envelope);central.reset(new ps::Session(ps::Session::restore(*c.platform,c.central_envelope->view())));nd::require(central->identity().central_user_id==c.central_user_id);catalog=c.catalog;auto all=central->nodes();auto f=std::find_if(all.begin(),all.end(),[&](const auto& n){return n.node_id==c.node_id;});nd::require(f!=all.end());selected=*f;node=catalog->federation_node(c.node_id);pp::match_catalog(selected,node);
  }
  template<class F> void authenticated(std::string_view scope,std::atomic<bool>& cancel,F f){detail::cancellation_point(cancel);central->revalidate();detail::cancellation_point(cancel);auto nodes=central->nodes();detail::cancellation_point(cancel);auto n=std::find_if(nodes.begin(),nodes.end(),[&](const auto& v){return v.node_id==context.node_id;});nd::require(n!=nodes.end());pp::same_node(selected,*n);nd::require(std::find(n->scopes.begin(),n->scopes.end(),scope)!=n->scopes.end());auto receipt=reserve_receipt(catalog,node.node_id);
  struct Cleanup{std::shared_ptr<Receipt> r;~Cleanup(){abandon(r);}} cleanup{receipt};receipt->ticket.emplace(central->issue(node.node_id));detail::cancellation_point(cancel);Secret body;exchange_body(body,*receipt->ticket);receipt->submitted=true;

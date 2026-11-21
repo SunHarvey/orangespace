@@ -11,7 +11,7 @@ int main() {
  for(auto p:{"","/a","a//b","a/../b","a\\b",".orangespace-upload-x","a/.orangespace-upload-x"})denied([&]{detail::checked_path(p);});
  assert(detail::encode_path("a/#?% x")=="a/%23%3F%25%20x");
  const std::string listing=R"({"node_id":"33333333-3333-4333-8333-333333333333","path":"folder/file","entries":[{"name":"x","kind":"file","size":1048577,"modified_at_ns":1793000000000000001}]})";
- auto entries=detail::parse_listing(listing,s);assert(entries.size()==1&&entries[0].size==1048577&&entries[0].path=="folder/file/x"&&!entries[0].modified_at_ns);
+ auto entries=detail::parse_listing(listing,s);assert(entries.size()==1&&entries[0].size==1048577&&entries[0].path=="folder/file/x"&&entries[0].modified_s==1793000000);
  auto wrong=listing;wrong.replace(wrong.find(s.node_id),36,c.node_id);denied([&]{detail::parse_listing(wrong,s);});
  wrong=listing;wrong.replace(wrong.find("\"name\":\"x\""),10,"\"name\":\"..\"");denied([&]{detail::parse_listing(wrong,s);});
  std::atomic<bool> cancelled{true};denied([&]{detail::cancellation_point(cancelled);});

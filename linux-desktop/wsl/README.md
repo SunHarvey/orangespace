@@ -11,6 +11,15 @@
 
 Windows 侧对应 `apps/windows-client/include/orangespace/wsl_runtime.hpp`（导入、启动、请求、关闭）和 `wsl_channel.hpp`（帧编解码），开发与验收工具是 `orangespace-wsl.exe`。
 
+## 代理协议（版本 2）
+
+每帧是一个 JSON 对象，带 `op`；回复带 `error` 表示失败。请求可以并发，回复按请求编号对应。
+- `desktop.*`：转给 `guest/desktop` 的同名命令（租约只经 stdin 交给它，不进命令行）。
+- 文件传送（沙盒的“下载”文件夹）：`files.list`；上传 `files.push` → 多次 `files.write` → `files.finish`；下载 `files.pull` → 多次 `files.read`；`files.cancel` 中止。
+  - 每次传送由代理生成的 UUID 标识，同时最多 8 个；每块最多 45 KiB，以 base64 装在 64 KiB 的帧里。
+  - 上传按声明的大小收满才发布，多出或不足都失败；下载结束时核对总字节数。
+  - 控制通道关闭（客户端退出或被强杀）时，进行中的传送全部终止，未完成的文件不会出现在“下载”里。
+
 ## 构建根文件系统
 
 在 Debian（或某个 Debian WSL 发行版）里以 root 运行，需要 mmdebstrap、curl、ca-certificates：

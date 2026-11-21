@@ -6,7 +6,7 @@
 
 - **中心与节点**（`server/`）：认证、节点授权、个人文件 API、隧道租约（[租约协议 v2](lease-protocol-v2.md)）。
 - **Rust 核心**（`crates/orangespace-core`、`crates/orangespace-https`）：绑定与代次模型、文件任务归属、TUIC 配置生成、应用私有 HTTPS。
-- **客户端**（`apps/windows-client`）：中心登录、授权节点、沙盒列表与绑定、节点文件面板、DPAPI 凭据。节点会话与租约的 C++ 库（`node_session`、`platform_session`）已迁到客户端，直接链接 `orangespace-https`。
+- **客户端**（`apps/windows-client`）：中心登录、授权节点、沙盒列表与绑定、节点文件客户端（`file_transfer`）、DPAPI 凭据。节点会话与租约的 C++ 库（`node_session`、`platform_session`）已迁到客户端，直接链接 `orangespace-https`。
 - **分支 `feat/linux-desktop-sandboxes`**：
   - 每沙盒网关（`linux-desktop/network/gateway.py`），其真实内核回归已在 WSL2 上通过；
   - 桌面镜像与生命周期（`linux-desktop/guest/`）。
@@ -201,12 +201,12 @@ Windows 测试机端到端（一个沙盒，香港节点，测试账户 `qa-l3`�
 
 ## L4 产品功能
 
-状态（2026-11-21）：第一步（沙盒窗口）完成并在测试虚拟机配合真实节点验收（见“沙盒窗口”一节）；节点文件传送与多沙盒并发验收待做。
+状态（2026-11-21）：沙盒窗口与节点文件传送完成，并在测试虚拟机配合真实节点验收（见下面两节）；记住登录（DPAPI）与多沙盒并发验收待做。
 
 - 中心登录、授权节点、沙盒列表同步，状态显示"网络离线 / 网关就绪 / 节点在线"。
 - 节点个人文件：
-  - 客户端文件面板继续管理节点文件；
-  - 新增"节点文件 ↔ 当前沙盒下载目录"双向传送，经客体代理完成；
+  - 每个沙盒的"文件"窗口浏览绑定节点上的个人文件；
+  - "节点文件 ↔ 该沙盒下载目录"双向传送，经客体代理完成；
   - 文件任务在创建时固定 node_id。
 - 多沙盒并发：每个沙盒有独立的容器、网关、租约和显示；单个沙盒异常只影响它自己。
 
@@ -228,6 +228,33 @@ Windows 测试机端到端（一个沙盒，香港节点，测试账户 `qa-l3`�
 
 这是测试虚拟机（RDP 会话）上的验收，不是物理机体验；记住登录（DPAPI）尚未接入，每次启动需重新登录。
 
+### 节点文件传送（2026-11-21）
+
+沙盒列表新增“文件…”：每个沙盒一个文件窗口，左边是绑定节点上的个人文件，右边是沙盒的“下载”文件夹，可双向复制（见 `apps/windows-client/README.md`）。旧路线的节点文件面板（`file_manager_win`）与只为它写的测试删除，其中一项是切读源码文本的测试。
+- **客体**：`desktop files-list / files-put / files-get` 以 root 打开该沙盒的 HOME 后立即降为它的宿主 UID，只读写 `Downloads` 下的普通文件；写入经临时文件以硬链接发布到空闲名字，从不覆盖。
+- **代理**（协议版本 2）：`files.*` 分块流式传送，每块 45 KiB，同时最多 8 个；控制通道关闭时全部终止。
+- **客户端**：节点一侧沿用 `file_transfer`（每次操作重新换取只含文件权限的节点凭据，任务固定 node_id），信任目录改为登录时载入的一份共享副本；沙盒一侧是新的 `sandbox_files`。中转目录在当前用户的 `users\<中心用户 UUID>\transfer`，每次复制完成或失败即删，登录时清空。节点列表的修改时间按整秒显示。
+
+测试：
+- Linux：代理的传送测试 5 项（往返、大小不符、拒绝、错误请求、随通道结束），客体 `files-*` 以 root 运行的测试 5 项（降权、符号链接、隐藏与未完成文件、不覆盖、未打开的沙盒）。
+- Windows：全量构建与 ctest 15 项通过（`node-tls-rejection` 按环境跳过），含 base64 与节点列表解析。
+
+测试虚拟机上用 UI 自动化操作文件窗口（QA 账号，香港节点，沙盒“香港 A”，停止状态下同样可用）：
+- 1.5 MB 文件从沙盒存到节点，再放回沙盒：自动取名 `l4-测试-a (1).bin`，两份 SHA-256 与原文件一致，属主为该沙盒的 UID、权限 600；其他沙盒的“下载”不受影响。
+- 同一文件再存到节点：提示节点上已有同名文件，不覆盖。
+- 200 MB 文件复制中点“取消”，以及复制中关闭文件窗口（先确认）：节点上没有残留，发行版里没有遗留的传送进程或临时文件，中转目录为空；之后重新打开窗口正常。
+
+这仍是测试虚拟机上的验收；没有测网络中断时的重试与断点续传（目前不支持续传，失败需重新复制）。
+
+### 旧路线删除（2026-11-21）
+
+按“退役”一节，从主线删除 `apps/browserhost`、`apps/windows-service`、客户端的 CEF 与原型目录、`tools/sandbox-devlaunch`、`drivers/wfp-prototype`、crate `orangespace-broker` 与 `orangespace-runtime`、Windows 开发包（`deploy/windows-dev`、`deploy/windows-client-sg`、`deploy/packages` 的 windows 角色）、`OrangeSpaceLogin`、服务客户端，以及只服务于它们的测试、脚本（`cef_package.py`、`smoke_tuic.py`）和 CI 步骤；只描述它们的两篇文档移到 `docs/archive/`。
+- 客户端不再依赖服务目录：`node_session` 库在 `apps/windows-client` 中定义，直接链接 `orangespace-https` 静态库（CMake 变量 `ORANGESPACE_HTTPS_LIBRARY`，`scripts/build-windows.ps1` 先构建它）；节点联邦校验（目录钉住、交换回复与节点绑定一致）移到 `node_federation.hpp`。
+- 凭据目录不再带开发安装后缀（那是旧服务的多实例安装用的）。
+- `orangespace-core` 按“可复用部分”保留，但 WSL 路线目前没有调用它。
+
+测试虚拟机上：`cargo fmt`、`cargo test --workspace`（含 12 项 `orangespace-https` 真实 TLS 测试）、`cargo clippy -D warnings` 通过；Windows 全量构建与 ctest 16 项通过（`node-tls-rejection` 按环境跳过；删掉的 11 项只测旧路线）。重新构建的 `OrangeSpace.exe` 用 QA 账号登录、打开“香港 A”：运行中、节点在线、租约续期，容器出口为 43.103.54.114；停止后容器与运行目录清空。
+
 ## L5 安装与升级
 
 - **安装器**：
@@ -238,12 +265,3 @@ Windows 测试机端到端（一个沙盒，香港节点，测试账户 `qa-l3`�
 - **卸载**：默认保留用户数据，另行提供"删除全部数据"。
 - **分发清单**：附软件包清单和源码获取方式。
 - **验收**：在全新机器上安装、升级、卸载各一遍。
-
-### 旧路线删除（2026-11-21）
-
-按“退役”一节，从主线删除 `apps/browserhost`、`apps/windows-service`、客户端的 CEF 与原型目录、`tools/sandbox-devlaunch`、`drivers/wfp-prototype`、crate `orangespace-broker` 与 `orangespace-runtime`、Windows 开发包（`deploy/windows-dev`、`deploy/windows-client-sg`、`deploy/packages` 的 windows 角色）、`OrangeSpaceLogin`、服务客户端，以及只服务于它们的测试、脚本（`cef_package.py`、`smoke_tuic.py`）和 CI 步骤；只描述它们的两篇文档移到 `docs/archive/`。
-- 客户端不再依赖服务目录：`node_session` 库在 `apps/windows-client` 中定义，直接链接 `orangespace-https` 静态库（CMake 变量 `ORANGESPACE_HTTPS_LIBRARY`，`scripts/build-windows.ps1` 先构建它）；节点联邦校验（目录钉住、交换回复与节点绑定一致）移到 `node_federation.hpp`。
-- 凭据目录不再带开发安装后缀（那是旧服务的多实例安装用的）。
-- `orangespace-core` 按“可复用部分”保留，但 WSL 路线目前没有调用它。
-
-测试虚拟机上：`cargo fmt`、`cargo test --workspace`（含 12 项 `orangespace-https` 真实 TLS 测试）、`cargo clippy -D warnings` 通过；Windows 全量构建与 ctest 16 项通过（`node-tls-rejection` 按环境跳过；删掉的 11 项只测旧路线）。重新构建的 `OrangeSpace.exe` 用 QA 账号登录、打开“香港 A”：运行中、节点在线、租约续期，容器出口为 43.103.54.114；停止后容器与运行目录清空。

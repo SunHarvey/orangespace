@@ -53,7 +53,7 @@ class AgentTest(unittest.TestCase):
     def test_ping_and_facts(self):
         kind, number, reply = self.agent.request(7, {"op": "ping"})
         self.assertEqual((kind, number), (REPLY, 7))
-        self.assertEqual(reply, {"ready": True, "agent_version": 1})
+        self.assertEqual(reply, {"ready": True, "agent_version": 2})
         _, _, info = self.agent.request(8, {"op": "facts"})
         for key in ("agent_version", "os", "kernel", "systemd", "windows_drives", "interop", "wslg"):
             self.assertIn(key, info)
@@ -169,6 +169,113 @@ print(json.dumps({{"ok": sys.argv[1]}}))
         self.agent.stop_started()
         stops = [c["args"] for c in self.calls() if c["args"][0] == "stop"]
         self.assertEqual(stops, [["stop", self.user, other], ["stop", self.user, self.sandbox]])
+
+
+
+class FileTransferTest(unittest.TestCase):
+    """Streams to and from a sandbox's Downloads go through guest/desktop in bounded chunks."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.folder = Path(self.tmp.name) / "Downloads"
+        self.folder.mkdir()
+        fake = Path(self.tmp.name) / "desktop"
+        # Stands in for guest/desktop files-*: same arguments, same stream formats.
+        fake.write_text(f"""#!{sys.executable}
+import json, sys, time
+folder = {str(self.folder)!r}
+op = sys.argv[1]
+if op == "files-list":
+    print(json.dumps({{"files": sorted(__import__("os").listdir(folder))}}))
+elif op == "files-put":
+    name, size = sys.argv[4], int(sys.argv[5])
+    data = sys.stdin.buffer.read()
+    if name == "refuse" or len(data) != size:
+        print(json.dumps({{"error": "refused"}})); sys.exit(1)
+    open(folder + "/" + name, "wb").write(data)
+    print(json.dumps({{"name": name, "size": size}}))
+elif op == "files-get":
+    name = sys.argv[4]
+    if name == "missing":
+        print(json.dumps({{"error": "no such file"}})); sys.exit(1)
+    if name == "slow":
+        sys.stdout.buffer.write(b'{{"size": 1000000}}\\n'); sys.stdout.flush(); time.sleep(60)
+    data = open(folder + "/" + name, "rb").read()
+    sys.stdout.buffer.write(json.dumps({{"size": len(data)}}).encode() + b"\\n" + data)
+""")
+        fake.chmod(0o755)
+        self.agent = agent_module.Agent(FakeChannel(), desktop=fake)
+        self.ids = {"user": str(uuid.uuid4()), "sandbox": str(uuid.uuid4())}
+
+    def push(self, name, data, chunk=agent_module.CHUNK):
+        import base64
+        transfer = self.agent.perform({"op": "files.push", **self.ids, "name": name, "size": len(data)})["transfer"]
+        for at in range(0, len(data), chunk):
+            self.agent.perform({"op": "files.write", "transfer": transfer,
+                                "data": base64.b64encode(data[at:at + chunk]).decode()})
+        return transfer, self.agent.perform({"op": "files.finish", "transfer": transfer})
+
+    def pull(self, name):
+        import base64
+        started = self.agent.perform({"op": "files.pull", **self.ids, "name": name})
+        data, end = b"", False
+        while not end:
+            reply = self.agent.perform({"op": "files.read", "transfer": started["transfer"]})
+            chunk = base64.b64decode(reply["data"])
+            self.assertLessEqual(len(chunk), agent_module.CHUNK)
+            data, end = data + chunk, reply["end"]
+        self.assertEqual(len(data), started["size"])
+        return data
+
+    def test_round_trip_in_bounded_chunks(self):
+        data = bytes(range(256)) * 700  # several chunks, not a multiple of the chunk size
+        _, result = self.push("报告.pdf", data)
+        self.assertEqual(result, {"name": "报告.pdf", "size": len(data)})
+        self.assertEqual((self.folder / "报告.pdf").read_bytes(), data)
+        self.assertEqual(self.pull("报告.pdf"), data)
+        self.assertEqual(self.pull_empty(), b"")
+        self.assertEqual(self.agent.transfers, {})
+
+    def pull_empty(self):
+        (self.folder / "empty").write_bytes(b"")
+        return self.pull("empty")
+
+    def test_a_push_never_takes_more_or_less_than_announced(self):
+        import base64
+        transfer = self.agent.perform({"op": "files.push", **self.ids, "name": "a", "size": 3})["transfer"]
+        with self.assertRaisesRegex(ValueError, "more data"):
+            self.agent.perform({"op": "files.write", "transfer": transfer, "data": base64.b64encode(b"abcd").decode()})
+        self.agent.perform({"op": "files.write", "transfer": transfer, "data": base64.b64encode(b"ab").decode()})
+        with self.assertRaisesRegex(ValueError, "less data"):
+            self.agent.perform({"op": "files.finish", "transfer": transfer})
+        with self.assertRaisesRegex(ValueError, "invalid data"):
+            self.agent.perform({"op": "files.write", "transfer": transfer, "data": "not base64!"})
+        self.assertEqual(self.agent.perform({"op": "files.cancel", "transfer": transfer}), {"cancelled": True})
+        with self.assertRaisesRegex(ValueError, "no such transfer"):
+            self.agent.perform({"op": "files.write", "transfer": transfer, "data": ""})
+        self.assertFalse((self.folder / "a").exists())
+
+    def test_guest_refusals_are_reported_and_leave_no_transfer(self):
+        with self.assertRaisesRegex(RuntimeError, "refused"):
+            self.push("refuse", b"x")
+        with self.assertRaisesRegex(RuntimeError, "no such file"):
+            self.agent.perform({"op": "files.pull", **self.ids, "name": "missing"})
+        self.assertEqual(self.agent.transfers, {})
+
+    def test_bad_requests_never_start_a_process(self):
+        for bad in ({"size": -1}, {"size": True}, {"size": 1 << 41}, {"name": 5}, {"sandbox": "x"}):
+            with self.subTest(bad=bad), self.assertRaises((ValueError, TypeError, AttributeError)):
+                self.agent.perform({"op": "files.push", **self.ids, "name": "a", "size": 1, **bad})
+        self.assertEqual(self.agent.transfers, {})
+
+    def test_transfers_end_with_the_control_channel(self):
+        started = self.agent.perform({"op": "files.pull", **self.ids, "name": "slow"})
+        process = self.agent.transfers[started["transfer"]].process
+        self.agent.stop_transfers()
+        self.assertIsNotNone(process.poll())
+        self.assertEqual(self.agent.transfers, {})
 
 
 if __name__ == "__main__":

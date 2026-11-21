@@ -13,7 +13,10 @@
 //
 // Signing in opens the Centre session; the sandbox list on this computer is per
 // Centre user. Opening a sandbox gets a node lease and starts its desktop;
-// closing this window stops every desktop and lets every lease lapse.
+// closing this window stops every desktop and lets every lease lapse. 文件…
+// opens a sandbox's files window: personal files on its node beside its
+// Downloads folder (see files_window.hpp).
+#include "orangespace/files_window.hpp"
 #include "orangespace/json.hpp"
 #include "orangespace/node_session.hpp"
 #include "orangespace/platform_session.hpp"
@@ -54,7 +57,7 @@ constexpr UINT kErased = WM_APP + 3;
 constexpr UINT kStopped = WM_APP + 4;  // engine shut down (sign-out or exit)
 constexpr UINT_PTR kTick = 1;
 
-enum Id : int { Username = 100, Password, SignIn, List, Name, Node, Create, Open, Stop, Rebind, Delete, SignOut };
+enum Id : int { Username = 100, Password, SignIn, List, Name, Node, Create, Open, Stop, Rebind, Delete, SignOut, Files };
 
 std::wstring widen(std::string_view s) {
   const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
@@ -191,6 +194,7 @@ class App {
     open_ = control(L"BUTTON", L"打开", WS_TABSTOP, Open);
     stop_ = control(L"BUTTON", L"停止", WS_TABSTOP, Stop);
     delete_ = control(L"BUTTON", L"删除…", WS_TABSTOP, Delete);
+    files_ = control(L"BUTTON", L"文件…", WS_TABSTOP, Files);
     name_label_ = control(L"STATIC", L"名称", SS_LEFT);
     name_ = control(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, Name, WS_EX_CLIENTEDGE);
     SendMessageW(name_, EM_LIMITTEXT, sb::kMaxNameChars, 0);
@@ -232,7 +236,7 @@ class App {
     const int list_top = m + px(36), list_bottom = bottom - px(48);
     MoveWindow(list_, m, list_top, w - 2 * m, (std::max)(px(80), list_bottom - list_top), TRUE);
     int x = m;
-    for (HWND b : {open_, stop_, delete_}) {
+    for (HWND b : {open_, stop_, files_, delete_}) {
       MoveWindow(b, x, list_bottom + gap, px(90), row, TRUE);
       x += px(90) + gap;
     }
@@ -258,6 +262,7 @@ class App {
         case Stop: stop_selected(); break;
         case Rebind: rebind_selected(); break;
         case Delete: delete_selected(); break;
+        case Files: open_files(); break;
         case SignOut: sign_out(); break;
         default: break;
       }
@@ -307,6 +312,11 @@ class App {
     nodes_ = std::move(result->nodes);
     const auto identity = centre_->identity();
     directory_ = user_directory(identity.central_user_id);
+    {
+      // Copies in transit left behind by a client that did not finish them.
+      std::error_code ec;
+      fs::remove_all(directory_ / L"transfer", ec);
+    }
     load_store();
     SetWindowTextW(identity_, (L"已登录：" + widen(identity.username)).c_str());
     SendMessageW(node_, CB_RESETCONTENT, 0, 0);
@@ -348,6 +358,7 @@ class App {
       return false;
     closing_ = true;
     exiting_ = true;
+    if (files_windows_) files_windows_->close_all();
     EnableWindow(window_, FALSE);
     notice(L"正在停止所有沙盒……");
     stop_everything();
@@ -356,6 +367,8 @@ class App {
 
   void stopped() {
     if (stop_thread_.joinable()) stop_thread_.join();
+    files_windows_.reset();
+    guest_files_.reset();
     engine_.reset();
     centre_.reset();
     if (exiting_) {
@@ -375,6 +388,8 @@ class App {
   void destroyed() {
     for (auto* t : {&agent_thread_, &sign_in_thread_, &stop_thread_})
       if (t->joinable()) t->join();
+    files_windows_.reset();
+    guest_files_.reset();
     engine_.reset();
     if (agent_) agent_->shutdown();
     DeleteObject(font_);
@@ -408,7 +423,7 @@ class App {
   void show_main(bool main) {
     for (HWND h : {heading_, username_label_, username_, password_label_, password_, sign_in_})
       ShowWindow(h, main ? SW_HIDE : SW_SHOW);
-    for (HWND h : {identity_, sign_out_, list_, open_, stop_, delete_, name_label_, name_, node_label_, node_, create_, rebind_})
+    for (HWND h : {identity_, sign_out_, list_, open_, stop_, files_, delete_, name_label_, name_, node_label_, node_, create_, rebind_})
       ShowWindow(h, main ? SW_SHOW : SW_HIDE);
     ShowWindow(notice_, SW_SHOW);
     layout();
@@ -418,8 +433,8 @@ class App {
 
   void load_trust() {
     try {
-      platform_.emplace(ps::PlatformConfig::load((trust_ / L"platform.json").wstring()));
-      catalog_.emplace(ns::TrustedCatalog::load((trust_ / L"catalog.json").wstring()));
+      platform_ = std::make_shared<const ps::PlatformConfig>(ps::PlatformConfig::load((trust_ / L"platform.json").wstring()));
+      catalog_ = std::make_shared<const ns::TrustedCatalog>(ns::TrustedCatalog::load((trust_ / L"catalog.json").wstring()));
       probe_ = load_probe(trust_ / L"probe.json");
     } catch (const std::exception&) {
       platform_.reset();
@@ -450,10 +465,13 @@ class App {
   void make_engine() {
     if (engine_ || !agent_ || !centre_ || !catalog_) return;
     const auto log_path = directory_ / L"client.log";
-    engine_ = std::make_unique<sb::Engine>(*catalog_, *centre_, *agent_, probe_, [log_path](const std::string& line) {
+    auto log = [log_path](const std::string& line) {
       // Events only (tunnel IDs, generations, reasons); never credentials.
       std::ofstream(log_path, std::ios::app | std::ios::binary) << line << "\n";
-    });
+    };
+    engine_ = std::make_unique<sb::Engine>(*catalog_, *centre_, *agent_, probe_, log);
+    guest_files_ = std::make_unique<sb::GuestFiles>(*agent_, centre_->identity().central_user_id);
+    files_windows_ = std::make_unique<sb::FilesWindows>(window_, *guest_files_, log);
   }
 
   void sign_in() {
@@ -508,6 +526,7 @@ class App {
         MessageBoxW(window_, L"退出登录会停止所有正在运行的沙盒桌面。要继续吗？", L"橙域", MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
       return;
     closing_ = true;
+    if (files_windows_) files_windows_->close_all();
     EnableWindow(window_, FALSE);
     notice(L"正在停止所有沙盒并退出登录……");
     stop_everything();
@@ -607,7 +626,7 @@ class App {
 
   void update_buttons() {
     if (!signed_in()) {
-      EnableWindow(sign_in_, !sign_in_thread_.joinable() && platform_.has_value());
+      EnableWindow(sign_in_, !sign_in_thread_.joinable() && platform_ != nullptr);
       return;
     }
     const auto* r = selected();
@@ -616,6 +635,7 @@ class App {
     EnableWindow(open_, r && engine_ && (idle || s.phase == sb::Phase::running) && node(r->node_id));
     EnableWindow(stop_, r && engine_ && sb::active(s.phase));
     EnableWindow(delete_, r && engine_ && idle);
+    EnableWindow(files_, r && files_windows_ && s.phase != sb::Phase::deleting && file_scopes(r->node_id));
     EnableWindow(rebind_, r && idle && chosen_node() && chosen_node()->node_id != r->node_id);
     EnableWindow(create_, chosen_node() && store_.records().size() < sb::kMaxSandboxes);
   }
@@ -662,6 +682,32 @@ class App {
     notice(running ? L"正在打开桌面窗口。" : L"正在启动「" + widen(r->name) + L"」。");
   }
 
+  bool file_scopes(const std::string& node_id) const {
+    const auto* n = node(node_id);
+    return n && std::find(n->scopes.begin(), n->scopes.end(), "files.read") != n->scopes.end() &&
+           std::find(n->scopes.begin(), n->scopes.end(), "files.write") != n->scopes.end();
+  }
+
+  void open_files() {
+    const auto* r = selected();
+    if (!r || !files_windows_ || !centre_ || !file_scopes(r->node_id)) {
+      notice(L"中心没有授权这个节点上的个人文件。");
+      return;
+    }
+    sb::FilesTarget target;
+    target.sandbox_id = r->id;
+    target.sandbox_name = r->name;
+    target.node_name = narrow(node_name(r->node_id));
+    target.context.central_user_id = centre_->identity().central_user_id;
+    target.context.sandbox_id = r->id;
+    target.context.node_id = r->node_id;
+    target.context.platform = platform_;
+    target.context.catalog = catalog_;
+    target.context.central_envelope = std::make_shared<const ps::SerializedSecret>(centre_->envelope());
+    target.staging = directory_ / L"transfer";
+    files_windows_->open(target);
+  }
+
   void stop_selected() {
     const auto* r = selected();
     if (!r || !engine_) return;
@@ -689,6 +735,7 @@ class App {
                       L"」？\n\n这个沙盒在本机的桌面、文件、下载和浏览器资料都会被删除，无法恢复。\n节点上的个人文件不受影响。";
     if (MessageBoxW(window_, text.c_str(), L"删除沙盒", MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2) != IDOK) return;
     const auto id = r->id;
+    if (files_windows_) files_windows_->close(id);
     HWND window = window_;
     engine_->erase(id, [window, id](bool ok, std::string) {
       PostMessageW(window, kErased, ok ? 1 : 0, reinterpret_cast<LPARAM>(new std::string(id)));
@@ -703,15 +750,17 @@ class App {
   UINT dpi_{96};
   HFONT font_{}, title_font_{};
   HWND heading_{}, username_label_{}, username_{}, password_label_{}, password_{}, sign_in_{};
-  HWND identity_{}, sign_out_{}, list_{}, open_{}, stop_{}, delete_{}, name_label_{}, name_{}, node_label_{}, node_{},
+  HWND identity_{}, sign_out_{}, list_{}, open_{}, stop_{}, files_{}, delete_{}, name_label_{}, name_{}, node_label_{}, node_{},
       create_{}, rebind_{}, notice_{};
   std::wstring notice_text_, agent_error_;
-  std::optional<ps::PlatformConfig> platform_;
-  std::optional<ns::TrustedCatalog> catalog_;
+  std::shared_ptr<const ps::PlatformConfig> platform_;
+  std::shared_ptr<const ns::TrustedCatalog> catalog_;
   std::string probe_;
   std::unique_ptr<wsl::Agent> agent_;
   std::unique_ptr<sb::Centre> centre_;
   std::unique_ptr<sb::Engine> engine_;
+  std::unique_ptr<sb::GuestFiles> guest_files_;
+  std::unique_ptr<sb::FilesWindows> files_windows_;
   std::vector<ps::NodeRef> nodes_;
   sb::Store store_;
   fs::path directory_;
