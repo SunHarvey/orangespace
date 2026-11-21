@@ -9,9 +9,14 @@
 
 #include <windows.h>
 
+#include <condition_variable>
 #include <cstdint>
+#include <map>
+#include <mutex>
+#include <set>
 #include <string>
 #include <string_view>
+#include <thread>
 
 namespace orangespace::wsl {
 
@@ -35,6 +40,12 @@ void unregister_distribution();
 
 // The long-lived agent child: `wsl.exe -d OrangeSpace -u root -- python3
 // /opt/orangespace/wsl/agent.py`, with private stdin/stdout pipes.
+//
+// Thread-safe: requests from different threads run concurrently (the agent
+// answers each on its own worker), so one sandbox's slow desktop start never
+// holds up another sandbox's lease renewal. A reader thread hands every reply
+// to the request waiting for its number; a reply nobody waits for any more
+// (timed out) is dropped.
 class Agent {
  public:
   explicit Agent(DWORD start_timeout_ms = 120000);
@@ -50,14 +61,22 @@ class Agent {
   DWORD pid() const noexcept { return pid_; }
 
  private:
-  void read_until(DWORD deadline_tick, bool want_reply, std::uint32_t number, std::string& out);
+  void read_marker(DWORD deadline_tick);
+  void read_replies() noexcept;
 
   HANDLE process_{};
   HANDLE to_agent_{};
   HANDLE from_agent_{};
   DWORD pid_{};
-  std::uint32_t next_{1};
   ReplyReader reader_;
+  std::thread reader_thread_;
+  std::mutex write_mutex_;
+  std::mutex mutex_;
+  std::condition_variable replied_;
+  std::uint32_t next_{1};
+  std::set<std::uint32_t> waiting_;
+  std::map<std::uint32_t, std::string> replies_;
+  bool closed_{false};
 };
 
 }  // namespace orangespace::wsl

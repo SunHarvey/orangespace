@@ -10,22 +10,21 @@ Windows 上同时运行多个沙盒，每个沙盒是一个窗口里的完整 Li
 
 沙盒运行在 Windows 自带的 WSL2 中、本项目自己的 Debian 发行版里：每个沙盒一个容器、一个私有显示窗口（WSLg）和一个网关网络命名空间，网关经 TUIC 连到绑定节点，出口许可随节点租约续期、到期由内核自动断开。详见 [架构说明](docs/architecture.md)、[路线图](docs/roadmap.md) 与 [选型方案](docs/proposal-wsl-linux-desktop.md)。
 
-**2026-11-20 起改为 WSL2 Linux 桌面路线，当前处于 L0 定案阶段。** 原生 Windows CEF/WFP 方案（下表中标为“退役”的部分）已在测试机跑通，但无法让 UDP 经节点、也没有完整桌面，不再推进。
+**2026-11-20 起改为 WSL2 Linux 桌面路线。** L1–L3（运行底座、沙盒桌面、全流量经节点）已在测试虚拟机配合真实节点验收，L4（产品功能）进行中。原生 Windows CEF/WFP 方案（下表中标为“退役”的部分）已在测试机跑通，但无法让 UDP 经节点、也没有完整桌面，不再推进。
 
 | 部分 | 当前实现 |
 |---|---|
-| Windows 客户端 | C++20 原生管理器：新建、列表、绑定节点、关闭、删除沙盒；实际调用 Rust broker |
+| Windows 客户端 | C++20 窗口 `OrangeSpace.exe`：中心登录、本机沙盒列表、新建/打开/停止/换节点/删除，显示每个沙盒的桌面、网络与租约状态；每沙盒独立节点会话与租约续期（见 [客户端说明](apps/windows-client/README.md)） |
 | 本机数据 | SQLite 元数据，每沙盒独立 profile/cache/tasks；关闭、切换节点保留，删除才清理 |
 | TUIC | sing-box 1.14.4 配置生成；真实双节点 TCP/UDP 回环集成测试；尚未接入 Windows 流量捕获 |
 | Linux 节点与中心 | Python/FastAPI、SQLAlchemy/Alembic、MySQL、中心身份和节点授权、个人文件 API；实际 RDS 资料待提供 |
-| Linux 桌面沙盒 | 新路线。分支 `feat/linux-desktop-sandboxes` 的每沙盒网关回归已在 WSL2 内核通过；WSL2 中每沙盒完整桌面窗口与 fcitx5 中文输入已做可行性验证。见路线图 L1–L3 |
+| Linux 桌面沙盒 | WSL2 发行版 `OrangeSpace`：每沙盒一个加固容器、私有显示与可重连窗口、网关命名空间与 TUIC 租约隧道（`linux-desktop/`）。见路线图 L1–L3 |
 | Windows 网络防护（退役） | `apps/windows-service/sandbox`：按程序路径或包 SID 的 WFP 规则与读回核实，`orangespace-netcheck` 实测通过 |
 | 浏览器（退役） | `apps/browserhost`：CEF 156 BrowserHost 以原生子窗口嵌入，`tools/sandbox-devlaunch` 双沙盒实测显示；服务 op 10 与客户端内嵌代码完成 |
-| 客户端登录 | 管理窗口接入受保护中心配置、中心 HTTPS SDK、授权节点、DPAPI 与本机 SQLite；真实 GUI 完整流程验收仍待完成 |
 | helper 生命周期 | 每沙盒独立 TUIC helper、LocalSystem Service 独立授权、精确停止；短时双沙盒真实链路通过，GUI 多租约周期与 WFP 分开验收 |
 | 浏览器文件桥 | 已确定接口与任务归属规则；尚未接入浏览器文件选择、下载回调 |
 
-管理窗口身份来自中心认证回复，授权节点来自中心 API；CLI 的 UUID 参数仍仅用于本机开发操作。Web 管理后台与 Windows 本机沙盒管理器是独立入口，Linux 不运行浏览器。干净源码三包构建见 [开发包构建](deploy/packages/README.md)，后续阶段见 [路线图](docs/roadmap.md)。
+客户端身份来自中心认证回复，授权节点来自中心 API。Web 管理后台与 Windows 本机沙盒管理器是独立入口，Linux 不运行浏览器。干净源码三包构建见 [开发包构建](deploy/packages/README.md)，后续阶段见 [路线图](docs/roadmap.md)。
 
 ## 目录
 

@@ -9,7 +9,7 @@
 | [network/](network/README.md) | 每沙盒网关（netns、TUN、sing-box）、租约与内核限时许可、真实内核回归 `smoke.py`、出口检查 `egress-check` |
 | [node/](node/README.md) | 节点安装（`install-api`）与向中心登记（`enroll-node`） |
 
-Windows 侧的对应部分在 `apps/windows-client`：`wsl_runtime`（导入、启动、请求、关闭）、`wsl_channel`（帧编解码），以及开发验收工具 `orangespace-wsl`（发行版）和 `orangespace-sandbox`（中心登录、节点租约、续租）。
+Windows 侧的对应部分在 `apps/windows-client`：`wsl_runtime`（导入、启动、请求、关闭）、`wsl_channel`（帧编解码），沙盒窗口 `OrangeSpace.exe` 与它的 `sandbox_engine`（中心登录、节点租约、续租），以及开发验收工具 `orangespace-wsl`（发行版）和 `orangespace-sandbox`。
 
 ## 测试
 

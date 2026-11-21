@@ -25,11 +25,6 @@ jobs:
           cmake -S . -B build -DORANGESPACE_RUNTIME_TEST_LIBRARY="$PWD/target/debug/liborangespace_runtime.a"
           cmake --build build
           ctest --test-dir build --output-on-failure
-      - name: GUI caller regressions (injected policy, not actual GUI acceptance)
-        run: |
-          python3 apps/windows-client/tests/platform_ui_status_tests.py --output "$RUNNER_TEMP/orangespace-ui-status"
-          python3 apps/windows-client/tests/platform_ui_adoption_tests.py --output "$RUNNER_TEMP/orangespace-ui-adoption"
-          python3 apps/windows-client/tests/platform_ui_logout_tests.py --output "$RUNNER_TEMP/orangespace-ui-logout"
       - name: Development package policy checks (not runtime acceptance)
         run: |
           python3 -m unittest discover -s deploy/packages/tests -v

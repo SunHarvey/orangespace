@@ -17,26 +17,6 @@ endif()
 target_link_libraries(orangespace_client_model INTERFACE orangespace_service_policy)
 if(BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
-  add_executable(orangespace-ui-v2-model-tests tests/ui_v2_model_tests.cpp)
-  target_link_libraries(orangespace-ui-v2-model-tests PRIVATE orangespace_client_model)
-  add_test(NAME ui-v2-model COMMAND orangespace-ui-v2-model-tests)
-  if(WIN32)
-    # These five contracts are compiler-independent. The sixth exercises the
-    # exact caller with injected GNU/OS seams and runs on Linux alongside the
-    # existing platform_ui_* caller tests; native helper policy is C++ above.
-    add_test(NAME ui-v2-source-contract
-      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/ui_v2_tests.py"
-        UiV2.test_protected_configuration_is_automatic_executable_sibling
-        UiV2.test_remember_controls_persistence
-        UiV2.test_tabs_and_file_context_preserve_identity
-        UiV2.test_automatic_node_open_is_one_worker_and_browser_stays_locked
-        UiV2.test_logout_requests_nonblocking_file_drain_before_identity_reuse)
-  else()
-    add_test(NAME ui-v2-source-contract
-      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/ui_v2_tests.py")
-  endif()
-  # Python reads UTF-8 sources; Chinese-locale Windows would otherwise default to GBK.
-  set_tests_properties(ui-v2-source-contract PROPERTIES ENVIRONMENT "PYTHONUTF8=1")
   add_executable(orangespace-file-transfer-tests tests/file_transfer_tests.cpp src/file_transfer_win.cpp)
   target_link_libraries(orangespace-file-transfer-tests PRIVATE orangespace_client_model)
   if(WIN32)
@@ -52,7 +32,7 @@ if(BUILD_TESTING)
   add_test(NAME file-manager-lifecycle COMMAND orangespace-file-manager-lifecycle-tests)
   # These bounded policy executables use assert as their verdict. Keep those
   # assertions active in the Release configuration used by Windows CI too.
-  foreach(_ui_policy_target orangespace-ui-v2-model-tests orangespace-file-transfer-tests orangespace-file-manager-lifecycle-tests)
+  foreach(_ui_policy_target orangespace-file-transfer-tests orangespace-file-manager-lifecycle-tests)
     if(MSVC)
       target_compile_options(${_ui_policy_target} PRIVATE /UNDEBUG /utf-8)
     else()
@@ -104,6 +84,14 @@ if(BUILD_TESTING)
   add_executable(orangespace-service-client-tests tests/service_client_tests.cpp)
   target_link_libraries(orangespace-service-client-tests PRIVATE orangespace_client_model)
   add_test(NAME service-client-negative-and-policy COMMAND orangespace-service-client-tests)
+  add_executable(orangespace-sandbox-model-tests tests/sandbox_model_tests.cpp)
+  target_link_libraries(orangespace-sandbox-model-tests PRIVATE orangespace_client_model)
+  add_test(NAME sandbox-model COMMAND orangespace-sandbox-model-tests)
+  if(MSVC)
+    target_compile_options(orangespace-sandbox-model-tests PRIVATE /UNDEBUG /utf-8)
+  else()
+    target_compile_options(orangespace-sandbox-model-tests PRIVATE -UNDEBUG)
+  endif()
   add_executable(orangespace-wsl-channel-tests tests/wsl_channel_tests.cpp)
   target_include_directories(orangespace-wsl-channel-tests PRIVATE include)
   add_test(NAME wsl-channel COMMAND orangespace-wsl-channel-tests)
@@ -172,11 +160,17 @@ if(WIN32)
   # Native login/chain diagnostics share the same authenticated service client as UI.
   add_executable(OrangeSpaceLogin src/login_win.cpp)
   target_link_libraries(OrangeSpaceLogin PRIVATE orangespace_node_session orangespace_service_client)
-  # L3 acceptance front end: Centre sign-in, one node session and tunnel lease
-  # per sandbox, renewals that keep each sandbox's kernel permit alive.
+  # Sandboxes on node leases: one worker per sandbox (own node session and
+  # tunnel, renewals that keep its kernel permit alive). Used by the window and
+  # by the acceptance front end orangespace-sandbox.
+  add_library(orangespace_sandbox_engine STATIC src/sandbox_engine_win.cpp)
+  target_include_directories(orangespace_sandbox_engine PUBLIC include PRIVATE ../windows-service/include)
+  target_link_libraries(orangespace_sandbox_engine PUBLIC orangespace_node_session orangespace_wsl_runtime PRIVATE bcrypt)
+  if(MSVC)
+    target_compile_options(orangespace_sandbox_engine PRIVATE /W4 /WX /permissive- /utf-8)
+  endif()
   add_executable(orangespace-sandbox src/sandbox_session_win.cpp)
-  target_include_directories(orangespace-sandbox PRIVATE include ../windows-service/include)
-  target_link_libraries(orangespace-sandbox PRIVATE orangespace_node_session orangespace_wsl_runtime bcrypt)
+  target_link_libraries(orangespace-sandbox PRIVATE orangespace_sandbox_engine)
   if(MINGW)
     target_link_options(orangespace-sandbox PRIVATE -municode)
   endif()
@@ -201,8 +195,7 @@ if(WIN32)
     target_compile_options(OrangeSpaceLogin PRIVATE /W4 /permissive- /utf-8)
   endif()
   enable_language(RC)
-  add_executable(OrangeSpace WIN32 src/main_win.cpp src/broker_win.cpp
-    src/file_manager_win.cpp src/file_transfer_win.cpp src/brand.rc)
+  add_executable(OrangeSpace WIN32 src/app_win.cpp src/brand.rc)
   if(MSVC)
     # Let MSVC merge and embed the manifest once. An RC-embedded copy would
     # collide with the linker's generated RT_MANIFEST resource (CVT1100).
@@ -227,15 +220,14 @@ if(WIN32)
   else()
     target_sources(OrangeSpace PRIVATE src/app.rc)
   endif()
-  target_link_libraries(OrangeSpace PRIVATE orangespace_client_model orangespace_node_session orangespace_service_client
-    comctl32 shell32 user32 gdi32 gdiplus comdlg32 ole32 winhttp crypt32 bcrypt)
+  target_link_libraries(OrangeSpace PRIVATE orangespace_sandbox_engine comctl32 shell32 user32 gdi32 ole32 bcrypt)
   target_compile_definitions(OrangeSpace PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
   target_include_directories(OrangeSpace PRIVATE src)
   if(TARGET orangespace-client-model-tests)
     target_link_libraries(orangespace-client-model-tests PRIVATE shell32)
   endif()
   if(MSVC)
-    target_compile_options(OrangeSpace PRIVATE /W4 /permissive- /utf-8)
+    target_compile_options(OrangeSpace PRIVATE /W4 /WX /permissive- /utf-8)
     if(TARGET orangespace-client-model-tests)
       target_compile_options(orangespace-client-model-tests PRIVATE /W4 /permissive- /utf-8)
     endif()

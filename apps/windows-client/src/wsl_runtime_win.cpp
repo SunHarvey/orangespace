@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <filesystem>
 #include <vector>
 
@@ -136,33 +137,25 @@ Agent::Agent(DWORD start_timeout_ms) {
   from_agent_ = out_read.h;
   out_read.h = nullptr;
   try {
-    std::string ignored;
-    read_until(GetTickCount() + start_timeout_ms, false, 0, ignored);  // first boot can take a while
+    read_marker(GetTickCount() + start_timeout_ms);  // first boot can take a while
   } catch (...) {
     shutdown();
     throw;
   }
+  reader_thread_ = std::thread([this] { read_replies(); });
 }
 
 Agent::~Agent() { shutdown(); }
 
 bool Agent::running() const noexcept { return process_ && WaitForSingleObject(process_, 0) == WAIT_TIMEOUT; }
 
-void Agent::read_until(DWORD deadline, bool want_reply, std::uint32_t number, std::string& out) {
-  for (;;) {
-    if (!want_reply && reader_.synced()) return;
-    if (want_reply) {
-      while (auto reply = reader_.next()) {
-        if (reply->number == number) {
-          out = std::move(reply->payload);
-          return;
-        }
-      }
-    }
+void Agent::read_marker(DWORD deadline) {
+  while (!reader_.synced()) {
     DWORD available = 0;
     if (!PeekNamedPipe(from_agent_, nullptr, 0, nullptr, &available, nullptr))
       throw RuntimeError("the WSL agent exited");
     if (available) {
+      // Read only what is there: never block past the deadline.
       std::array<char, 16384> buffer{};
       DWORD got = 0;
       if (!ReadFile(from_agent_, buffer.data(), static_cast<DWORD>((std::min<std::size_t>)(available, buffer.size())),
@@ -172,36 +165,97 @@ void Agent::read_until(DWORD deadline, bool want_reply, std::uint32_t number, st
       reader_.feed(buffer.data(), got);
       continue;
     }
-    if (tick_passed(deadline)) throw RuntimeError(want_reply ? "the WSL agent did not answer" : "the WSL agent did not start");
+    if (tick_passed(deadline)) throw RuntimeError("the WSL agent did not start");
     Sleep(10);
   }
 }
 
+void Agent::read_replies() noexcept {
+  try {
+    for (;;) {
+      while (auto reply = reader_.next()) {
+        std::lock_guard lock(mutex_);
+        if (waiting_.count(reply->number)) {
+          replies_[reply->number] = std::move(reply->payload);
+          replied_.notify_all();
+        }
+      }
+      std::array<char, 16384> buffer{};
+      DWORD got = 0;
+      if (!ReadFile(from_agent_, buffer.data(), static_cast<DWORD>(buffer.size()), &got, nullptr) || !got) break;
+      reader_.feed(buffer.data(), got);
+    }
+  } catch (...) {
+    // A malformed frame ends the channel like an exit does.
+  }
+  std::lock_guard lock(mutex_);
+  closed_ = true;
+  replied_.notify_all();
+}
+
 std::string Agent::request(std::string_view json, DWORD timeout_ms) {
-  if (!running()) throw RuntimeError("the WSL agent is not running");
-  const std::uint32_t number = next_++;
-  const auto frame = request_frame(number, json);
-  DWORD wrote = 0;
-  if (!WriteFile(to_agent_, frame.data(), static_cast<DWORD>(frame.size()), &wrote, nullptr) || wrote != frame.size())
-    throw RuntimeError("cannot write to the WSL agent");
-  std::string reply;
-  read_until(GetTickCount() + timeout_ms, true, number, reply);
+  std::uint32_t number = 0;
+  {
+    std::lock_guard lock(mutex_);
+    if (closed_ || !process_) throw RuntimeError("the WSL agent is not running");
+    number = next_++;
+    if (next_ == 0) next_ = 1;
+    waiting_.insert(number);
+  }
+  const auto forget = [&] {
+    std::lock_guard lock(mutex_);
+    waiting_.erase(number);
+    replies_.erase(number);
+  };
+  try {
+    const auto frame = request_frame(number, json);
+    std::lock_guard write(write_mutex_);
+    DWORD wrote = 0;
+    if (!to_agent_ || !WriteFile(to_agent_, frame.data(), static_cast<DWORD>(frame.size()), &wrote, nullptr) ||
+        wrote != frame.size())
+      throw RuntimeError("cannot write to the WSL agent");
+  } catch (...) {
+    forget();
+    throw;
+  }
+  std::unique_lock lock(mutex_);
+  const bool answered = replied_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                                          [&] { return replies_.count(number) || closed_; });
+  auto found = replies_.find(number);
+  if (!answered || found == replies_.end()) {
+    waiting_.erase(number);
+    throw RuntimeError(closed_ ? "the WSL agent exited" : "the WSL agent did not answer");
+  }
+  std::string reply = std::move(found->second);
+  replies_.erase(found);
+  waiting_.erase(number);
   return reply;
 }
 
 void Agent::shutdown() noexcept {
   if (!process_) return;
   try {
-    if (running() && to_agent_) (void)request(R"({"op":"shutdown"})", 10000);
+    if (running() && reader_thread_.joinable()) (void)request(R"({"op":"shutdown"})", 10000);
   } catch (...) {
   }
-  if (to_agent_) CloseHandle(to_agent_);  // EOF also ends the agent
-  to_agent_ = nullptr;
+  {
+    std::lock_guard write(write_mutex_);
+    if (to_agent_) CloseHandle(to_agent_);  // EOF also ends the agent
+    to_agent_ = nullptr;
+  }
   if (WaitForSingleObject(process_, 15000) != WAIT_OBJECT_0) TerminateProcess(process_, 1);
+  // wsl.exe has exited, so the pipe's write end is gone and the reader sees EOF.
+  if (reader_thread_.joinable()) {
+    if (WaitForSingleObject(process_, 5000) == WAIT_OBJECT_0) CancelSynchronousIo(reader_thread_.native_handle());
+    reader_thread_.join();
+  }
   if (from_agent_) CloseHandle(from_agent_);
   from_agent_ = nullptr;
   CloseHandle(process_);
   process_ = nullptr;
+  std::lock_guard lock(mutex_);
+  closed_ = true;
+  replied_.notify_all();
 }
 
 }  // namespace orangespace::wsl
