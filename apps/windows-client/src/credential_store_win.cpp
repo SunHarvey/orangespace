@@ -1,7 +1,6 @@
 #include "orangespace/credential_store.hpp"
 #include "orangespace/platform_credential_store.hpp"
 #ifdef _WIN32
-#include "../../windows-service/include/orangespace/install_identity.hpp"
 #include <windows.h>
 #include <winternl.h>
 #include <aclapi.h>
@@ -146,13 +145,8 @@ Handle relative_file(HANDLE directory, const std::wstring& leaf, DWORD access, D
 }
 enum class StoreKind { node, platform };
 std::wstring credential_directory_leaf(StoreKind kind) {
-  std::wstring leaf = kind == StoreKind::node ? L"OrangeSpace-Credentials-v1"
+  return kind == StoreKind::node ? L"OrangeSpace-Credentials-v1"
       : std::wstring(platform_session::credential_detail::directory_name);
-  if (!install_identity::suffix.empty()) {
-    leaf += L".Dev.";
-    leaf.append(install_identity::suffix.begin(), install_identity::suffix.end());
-  }
-  return leaf;
 }
 struct Directory {
   struct Com {

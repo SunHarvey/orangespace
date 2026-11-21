@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/orangespace-core", "crates/orangespace-broker", "crates/orangespace-runtime", "crates/orangespace-https"]
+members = ["crates/orangespace-core", "crates/orangespace-https"]
 resolver = "2"
 
 [workspace.package]

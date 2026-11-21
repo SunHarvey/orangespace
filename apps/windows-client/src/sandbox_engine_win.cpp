@@ -1,7 +1,7 @@
 #include "orangespace/sandbox_engine.hpp"
 
 #include "orangespace/json.hpp"
-#include "orangespace/platform_protocol.hpp"
+#include "orangespace/node_federation.hpp"
 
 #include <bcrypt.h>
 
@@ -14,7 +14,7 @@ namespace orangespace::sandbox {
 namespace ps = orangespace::platform_session;
 namespace ns = orangespace::node_session;
 namespace nd = orangespace::node_session::detail;
-namespace pp = orangespace::service::platform;
+namespace pp = orangespace::node_federation;
 
 namespace {
 constexpr std::int64_t kRenewEveryMs = 10000;

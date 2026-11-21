@@ -30,7 +30,7 @@
 
 **未验证/未完成**：管理窗口成功登录和交互验收、服务与 broker/helper 串联、持久凭据库、成功的真实 HTTPS 节点登录及其余 TLS/重定向负例、独立第二账号、active-WTS 多会话、CEF sandbox 子进程、WFP TCP/UDP/受管 DNS/抓包、完整浏览器与文件桥、安装/驱动签名分发。
 
-相关复现：`apps/windows-service/README.md`、`docs/client-login.md`、`docs/cef-build.md`、`docs/delivery-plan.md`。
+相关复现：`apps/windows-service/README.md`、`docs/archive/client-login.md`、`docs/cef-build.md`、`docs/delivery-plan.md`。
 
 ## 2026-10-29 初始 macOS 基线记录（历史）
 

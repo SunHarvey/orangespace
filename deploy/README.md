@@ -48,5 +48,4 @@ sing-box check -c /secure/path/tuic-new.json
 server/.venv/bin/python scripts/smoke_node.py
 ```
 
-`scripts/smoke_tuic.py` 对两套临时客户端/节点做真实 TCP/UDP 转发验证，不等于完成 Windows WFP 验收。
 目前 PostgreSQL 真库测试已写入 CI，但本机无 PostgreSQL，尚未执行；systemd/Caddy/Unbound 的 Linux 实机部署也尚未执行。

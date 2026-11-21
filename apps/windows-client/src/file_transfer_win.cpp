@@ -54,10 +54,10 @@ TaskScope::TaskScope(const FileContext& c,std::string_view p,bool root)
 #include <chrono>
 #include <system_error>
 #include "orangespace/file_https_abi.h"
-#include "orangespace/platform_protocol.hpp"
+#include "orangespace/node_federation.hpp"
 namespace orangespace::files {
 namespace {
-namespace pp=service::platform;
+namespace pp=node_federation;
 void check(BOOL b) {if(!b){auto e=GetLastError();throw std::system_error(static_cast<int>(e?e:ERROR_GEN_FAILURE),std::system_category(),"file API operation failed");}}
 struct CloseInternet {void operator()(void* p)const noexcept {if(p)WinHttpCloseHandle(p);}};
 using Internet=std::unique_ptr<void,CloseInternet>;
@@ -65,7 +65,7 @@ using local_io::File;using local_io::LocalPath;using local_io::Part;
 struct Secret {std::string value;~Secret(){nd::wipe(value.data(),value.size());}};
 struct WideSecret {std::wstring value;~WideSecret(){nd::wipe(value.data(),value.size()*sizeof(wchar_t));}};
 std::wstring wide(std::string_view s){return {s.begin(),s.end()};}
-std::string quote(std::string_view s){return service::chain::quote(s);}
+std::string quote(std::string_view s){return node_federation::quote(s);}
 std::int64_t now(){return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();}
 void exchange_body(Secret& b,const ps::ExchangeTicket& t){nd::require(nd::uuid(t.exchange_id));nd::validate_token(t.exchange_token.view());b.value.reserve(256);b.value="{\"schema\":1,\"exchange_id\":\"";b.value+=t.exchange_id;b.value+="\",\"exchange_token\":\"";b.value.append(t.exchange_token.view());b.value+="\"}";}
 std::wstring catalog_path(){std::array<wchar_t,32768> b{};auto n=GetModuleFileNameW(nullptr,b.data(),static_cast<DWORD>(b.size()));nd::require(n && n<b.size());std::wstring p(b.data(),n);return p.substr(0,p.find_last_of(L'\\')+1)+L"nodes.json";}

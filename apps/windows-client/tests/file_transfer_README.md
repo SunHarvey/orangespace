@@ -19,7 +19,7 @@ g++ -std=c++20 -Wall -Wextra -Werror -Iapps/windows-client/include \
   apps/windows-client/src/file_transfer_win.cpp -o <owned>/file-transfer-tests
 <owned>/file-transfer-tests
 x86_64-w64-mingw32-g++ -std=c++20 -Wall -Wextra -Werror \
-  -Iapps/windows-client/include -Iapps/windows-service/include \
+  -Iapps/windows-client/include \
   -c apps/windows-client/src/file_transfer_win.cpp -o <owned>/file-transfer-win.o
 ```
 

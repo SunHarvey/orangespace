@@ -6,7 +6,7 @@
 
 - **中心与节点**（`server/`）：认证、节点授权、个人文件 API、隧道租约（[租约协议 v2](lease-protocol-v2.md)）。
 - **Rust 核心**（`crates/orangespace-core`、`crates/orangespace-https`）：绑定与代次模型、文件任务归属、TUIC 配置生成、应用私有 HTTPS。
-- **客户端**（`apps/windows-client`）：中心登录、授权节点、沙盒列表与绑定、节点文件面板、DPAPI 凭据。节点会话与租约的 C++ 库（`node_session`、`platform_session`）目前由服务和客户端共用，迁到客户端直接使用。
+- **客户端**（`apps/windows-client`）：中心登录、授权节点、沙盒列表与绑定、节点文件面板、DPAPI 凭据。节点会话与租约的 C++ 库（`node_session`、`platform_session`）已迁到客户端，直接链接 `orangespace-https`。
 - **分支 `feat/linux-desktop-sandboxes`**：
   - 每沙盒网关（`linux-desktop/network/gateway.py`），其真实内核回归已在 WSL2 上通过；
   - 桌面镜像与生命周期（`linux-desktop/guest/`）。
@@ -16,6 +16,8 @@
 ## 退役
 
 `apps/browserhost`、`apps/windows-service`（含 `sandbox/` WFP 库、原型服务与 OSP 协议）、`apps/windows-client` 中的浏览器嵌入与 CEF 打包、`tools/sandbox-devlaunch`、`drivers/wfp-prototype`。
+
+状态（2026-11-21）：已从主线删除，见 L4 的“旧路线删除”一节。
 
 退役前先把 `p0-consolidation` 上的原生方案完整提交保存，之后从主线删除，代码可在 git 历史中查到。退役时连同只服务于它们的测试和构建脚本一起删除，不保留无法运行的代码。
 
@@ -236,3 +238,12 @@ Windows 测试机端到端（一个沙盒，香港节点，测试账户 `qa-l3`�
 - **卸载**：默认保留用户数据，另行提供"删除全部数据"。
 - **分发清单**：附软件包清单和源码获取方式。
 - **验收**：在全新机器上安装、升级、卸载各一遍。
+
+### 旧路线删除（2026-11-21）
+
+按“退役”一节，从主线删除 `apps/browserhost`、`apps/windows-service`、客户端的 CEF 与原型目录、`tools/sandbox-devlaunch`、`drivers/wfp-prototype`、crate `orangespace-broker` 与 `orangespace-runtime`、Windows 开发包（`deploy/windows-dev`、`deploy/windows-client-sg`、`deploy/packages` 的 windows 角色）、`OrangeSpaceLogin`、服务客户端，以及只服务于它们的测试、脚本（`cef_package.py`、`smoke_tuic.py`）和 CI 步骤；只描述它们的两篇文档移到 `docs/archive/`。
+- 客户端不再依赖服务目录：`node_session` 库在 `apps/windows-client` 中定义，直接链接 `orangespace-https` 静态库（CMake 变量 `ORANGESPACE_HTTPS_LIBRARY`，`scripts/build-windows.ps1` 先构建它）；节点联邦校验（目录钉住、交换回复与节点绑定一致）移到 `node_federation.hpp`。
+- 凭据目录不再带开发安装后缀（那是旧服务的多实例安装用的）。
+- `orangespace-core` 按“可复用部分”保留，但 WSL 路线目前没有调用它。
+
+测试虚拟机上：`cargo fmt`、`cargo test --workspace`（含 12 项 `orangespace-https` 真实 TLS 测试）、`cargo clippy -D warnings` 通过；Windows 全量构建与 ctest 16 项通过（`node-tls-rejection` 按环境跳过；删掉的 11 项只测旧路线）。重新构建的 `OrangeSpace.exe` 用 QA 账号登录、打开“香港 A”：运行中、节点在线、租约续期，容器出口为 43.103.54.114；停止后容器与运行目录清空。

@@ -31,12 +31,19 @@
 
 ## 构建与测试
 
-需要 Windows 11 x64、Visual Studio 2022（C++ 桌面开发）、Windows SDK、CMake 3.24+。在仓库根目录：
+需要 Windows 11 x64、Visual Studio 2022（C++ 桌面开发）、Windows SDK、Rust（最低 1.89）、CMake 3.24+。应用私有 HTTPS 来自 Rust 静态库 `orangespace-https`，配置时用 `ORANGESPACE_HTTPS_LIBRARY` 指定。在仓库根目录：
 
 ```powershell
-cmake -S . -B build/windows -A x64
-cmake --build build/windows --config Release --target OrangeSpace orangespace-sandbox orangespace-wsl
-ctest --test-dir build/windows -C Release -R "sandbox-model|wsl-channel" --output-on-failure
+./scripts/build-windows.ps1
+```
+
+它依次执行：
+
+```powershell
+cargo build --locked --release -p orangespace-https
+cmake -S . -B build/windows -A x64 "-DORANGESPACE_HTTPS_LIBRARY=$PWD/target/release/orangespace_https.lib"
+cmake --build build/windows --config Release
+ctest --test-dir build/windows -C Release --output-on-failure
 ```
 
 `sandbox-model` 测试本机沙盒列表的解析与校验和状态文字；`wsl-channel` 测试代理帧协议。窗口、续租与出口要在 Windows 实机配合真实节点验收，见 [docs/roadmap.md](../../docs/roadmap.md)。

@@ -1,25 +1,21 @@
 param([ValidateSet('Debug', 'Release')][string]$Configuration = 'Release')
+# Builds the Windows client (OrangeSpace.exe, orangespace-wsl, orangespace-sandbox)
+# and runs its tests. The client's app-private HTTPS comes from the Rust
+# orangespace-https static library, built here first.
 $ErrorActionPreference = 'Stop'
 $Repository = Split-Path -Parent $PSScriptRoot
 Push-Location $Repository
 try {
-    & cargo build --locked --release --jobs 1 -p orangespace-broker -p orangespace-runtime
-    if ($LASTEXITCODE -ne 0) { throw 'Rust broker/runtime build failed' }
-    $RuntimeLibrary = Join-Path $Repository 'target/release/orangespace_runtime.lib'
-    if (!(Test-Path -LiteralPath $RuntimeLibrary -PathType Leaf)) { throw 'Required service runtime static library is absent' }
-    & cmake -S . -B build/windows -A x64 "-DORANGESPACE_RUNTIME_LIBRARY=$RuntimeLibrary"
+    & cargo build --locked --release --jobs 1 -p orangespace-https
+    if ($LASTEXITCODE -ne 0) { throw 'orangespace-https build failed' }
+    $HttpsLibrary = Join-Path $Repository 'target/release/orangespace_https.lib'
+    if (!(Test-Path -LiteralPath $HttpsLibrary -PathType Leaf)) { throw 'orangespace_https.lib is absent' }
+    & cmake -S . -B build/windows -A x64 "-DORANGESPACE_HTTPS_LIBRARY=$HttpsLibrary"
     if ($LASTEXITCODE -ne 0) { throw 'CMake configuration failed' }
     & cmake --build build/windows --config $Configuration --parallel 1
     if ($LASTEXITCODE -ne 0) { throw 'Windows client build failed' }
     & ctest --test-dir build/windows -C $Configuration --output-on-failure
-    if ($LASTEXITCODE -ne 0) { throw 'Client model checks failed' }
-    $Output = Join-Path $Repository 'artifacts/windows-dev'
-    New-Item -ItemType Directory -Force -Path $Output | Out-Null
-    Copy-Item "build/windows/apps/windows-client/$Configuration/OrangeSpace.exe" $Output
-    Copy-Item "build/windows/apps/windows-client/$Configuration/OrangeSpaceLogin.exe" $Output
-    Copy-Item "build/windows/apps/windows-service/$Configuration/OrangeSpaceService.exe" $Output
-    Copy-Item 'target/release/orangespace-broker.exe' $Output
-    Write-Host "Development manager created at $Output. BrowserHost is not included yet (P1)."
+    if ($LASTEXITCODE -ne 0) { throw 'Windows client tests failed' }
 } finally {
     Pop-Location
 }

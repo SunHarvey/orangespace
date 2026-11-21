@@ -22,22 +22,18 @@ jobs:
           cargo +1.89.0 test --workspace --locked
       - name: Native model checks
         run: |
-          cmake -S . -B build -DORANGESPACE_RUNTIME_TEST_LIBRARY="$PWD/target/debug/liborangespace_runtime.a"
+          cmake -S . -B build
           cmake --build build
           ctest --test-dir build --output-on-failure
       - name: Development package policy checks (not runtime acceptance)
         run: |
           python3 -m unittest discover -s deploy/packages/tests -v
-          python3 -m unittest discover -s deploy/windows-dev/tests -v
-      - name: Verify actual TUIC TCP and UDP
+      - name: Real sing-box helper lifecycle on Linux
         run: |
           curl -fL --retry 3 https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64.tar.gz -o /tmp/sing-box.tar.gz
           echo '699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968  /tmp/sing-box.tar.gz' | sha256sum -c -
           tar -xzf /tmp/sing-box.tar.gz -C /tmp
-          python3 scripts/smoke_tuic.py --sing-box /tmp/sing-box-1.14.4-linux-amd64/sing-box
           ORANGESPACE_TEST_SING_BOX=/tmp/sing-box-1.14.4-linux-amd64/sing-box cargo test -p orangespace-core --locked --test helper_runtime -- --ignored
-          python3 -c 'import subprocess; cases=subprocess.check_output(["cargo","test","-p","orangespace-runtime","--locked","--lib","--","--list"],text=True); required=["real_tuic_proof_not_stdin_and_close_a_does_not_close_b","real_socks_stdin_without_tuic_never_reports_authenticated_or_running","real_renew_extends_only_live_exact_binding_past_initial_expiry","real_renew_never_revives_expired_binding_even_before_poll"]; assert all("tests::"+name+": test" in cases.splitlines() for name in required), "required real runtime cases missing"'
-          ORANGESPACE_TEST_SING_BOX=/tmp/sing-box-1.14.4-linux-amd64/sing-box cargo test -p orangespace-runtime --locked --lib -- --ignored --test-threads=1
   node-mysql:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
@@ -197,16 +193,16 @@ jobs:
           npm run typecheck
           npm test -- --maxWorkers=1
           npm run build
-  windows-manager:
+  windows-client:
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
-      - name: Rust helper lifecycle tests on Windows (not WFP validation)
+      - name: Rust core tests on Windows (orangespace-https TLS tests run on Linux)
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $false
           $logPath = Join-Path $env:RUNNER_TEMP ('orangespace-rust-' + [guid]::NewGuid().ToString('N') + '.log')
-          cargo test -p orangespace-core -p orangespace-runtime --locked *> $logPath
+          cargo test -p orangespace-core --locked *> $logPath
           $cargoExitCode = $LASTEXITCODE
           Get-Content -LiteralPath $logPath
           if ($cargoExitCode -ne 0) {
@@ -216,7 +212,7 @@ jobs:
             Write-Output "::error title=Windows Rust cargo failure::cargo exit $cargoExitCode; last 60 lines (at most 3000 characters):%0A$details"
             exit 1
           }
-      - name: Real Windows sing-box helper lifecycle (not WFP validation)
+      - name: Real Windows sing-box helper lifecycle
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -239,7 +235,7 @@ jobs:
             Remove-Item Env:ORANGESPACE_TEST_SING_BOX -ErrorAction SilentlyContinue
             if (Test-Path -LiteralPath $fixture) { Remove-Item -LiteralPath $fixture -Recurse -Force }
           }
-      - name: Build native manager and service
+      - name: Build and test the Windows client (not WSL or node acceptance)
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $false

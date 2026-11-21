@@ -1,51 +1,17 @@
-# Rust 控制核心与本地 broker
+# Rust 组件
 
-当前代码实现的是控制平面的隔离规则及本地元数据管理。**尚未捕获实际 TCP/UDP 数据，也没有完成 Windows WFP/DNS 管控，因此任何 `open` 都失败；不能用它安全上网。**
+仓库最低 Rust 为 **1.89**，两个 crate 都是根工作区成员，构建与测试从仓库根目录执行（`cargo test --workspace --locked`）。
 
-## helper 生命周期增量
+## orangespace-https
 
-新增真实子进程 supervisor，完整绑定用户／沙盒／节点／代次／隧道；配置仅通过 stdin，退出和回收不自动重连或回退。Windows 每 Binding 独立、不可继承的单进程 kill-on-close Job 已通过原生普通／breakaway 创建拒绝、唯一 assignment 和监督进程无 Drop 异常退出回收测试；这不限制浏览器多进程，真实 Windows sing-box 的认证、A/B 独立停止及无 Drop 异常退出回收也已实机通过。受保护安装前提、spawn/assignment 非原子窗口、真实执行范围与未完成项见 [helper 说明](../docs/archive/helper-lifecycle.md)。
+Windows 客户端的应用私有 HTTPS：C ABI 静态库（`include/orangespace_https.h`，`os_https_request_v1` 与节点文件传输用的 `os_https_transfer_v1`），rustls 只信任客户端传入的钉住 CA，不用系统根证书、不读代理环境、不跟随重定向。客户端的中心与节点会话（`apps/windows-client` 的 `node_session`）链接它；`scripts/build-windows.ps1` 先构建它再构建客户端。接口约束见 [orangespace-https/README.md](orangespace-https/README.md)。
 
-此模块尚未串入服务的认证授权与路由失效链，不能据此放开浏览器。仓库最低 Rust 为 **1.89**，保留现有依赖锁。
+## orangespace-core
 
-## 本地试运行
+绑定与代次模型（用户/沙盒/节点/代次/隧道显式绑定）、文件任务的节点归属、sing-box TUIC 配置生成，以及 helper 子进程监督（配置只经 stdin，Windows 上每个绑定一个 kill-on-close Job）。这些是旧原生路线的 Rust 部分，路线图列为可复用；WSL 桌面路线目前没有调用它（每沙盒网关的 TUIC 配置由 `linux-desktop/network/gateway.py` 生成）。真实 sing-box 生命周期测试需 `ORANGESPACE_TEST_SING_BOX` 指向官方 1.14.4 程序：
 
 ```sh
-cargo run -p orangespace-broker -- --data-dir /tmp/orangespace-local status
-cargo run -p orangespace-broker -- --data-dir /tmp/orangespace-local create --user 11111111-1111-4111-8111-111111111111 --name 深圳工作区
-cargo run -p orangespace-broker -- --data-dir /tmp/orangespace-local list --user 11111111-1111-4111-8111-111111111111
+ORANGESPACE_TEST_SING_BOX=/absolute/path/to/sing-box cargo test -p orangespace-core --locked --test helper_runtime -- --ignored
 ```
 
-Windows 默认数据目录是 `%LOCALAPPDATA%\OrangeSpace`。其他平台必须显式提供 `--data-dir`。UUID 用户参数用于本地开发管理，并非服务器登录验证；正式客户端必须从经过认证的会话绑定用户，并由受限 IPC 和 Windows 身份约束请求。
-
-`bind --user UUID --sandbox UUID --node UUID` 持久化节点绑定并递增代次，不创建隧道。`close` 保留本地数据。`delete` 仅删除指定沙盒的 profile/cache/tasks 和本地任务，不访问 Linux 文件服务。删除失败保留 `deleting` 元数据，可重试。`task-create`/`task-list` 仅演示不可变目标节点记录，尚不传输文件。
-
-stdout 是一行 JSON，`schema_version=1`。业务错误退出 1，错误也输出 JSON；命令行语法错误由 clap 输出到 stderr。`status` 总是 `browsing_allowed=false`；`open` 无法通过配置开关绕过 GuardBackend。原生 UI 可调用此 CLI，但生产 IPC 尚未实现。
-
-## TUIC 离线配置
-
-`tunnel-config --user UUID --sandbox UUID --settings-file private-settings.json --output private-tuic.json` 生成 sing-box 配置文件，**不运行** helper 或浏览器。输出必须不存在，Unix 权限 0600。Windows 的受限 ACL 文件写入未完成，因此 Windows 上此命令被拒绝。
-
-设置文件格式如下；示例凭据不可部署。请使用随机密码并保护源设置文件，勿纳入版本库：
-
-```json
-{
-  "node_id": "22222222-2222-4222-8222-222222222222",
-  "endpoint_ip": "203.0.113.10",
-  "endpoint_port": 443,
-  "tls_server_name": "sz.example.test",
-  "tuic_uuid": "11111111-1111-4111-8111-111111111111",
-  "tuic_password": "REPLACE_WITH_A_RANDOM_SECRET",
-  "socks_port": 19080,
-  "socks_username": "broker-only",
-  "socks_password": "REPLACE_WITH_ANOTHER_RANDOM_SECRET"
-}
-```
-
-只接受字面 IP 作为节点地址；证书的 DNS 名单独指定且验证开启。唯一 outbound 为 TUIC，`route.final` 固定该 outbound，不存在 direct 回退。UDP 为 native DATAGRAM，0-RTT 关闭，本地 SOCKS 仅监听 127.0.0.1 并要求认证。这仍不能代替 WFP：未完成管控时不得向浏览器公开此 SOCKS 凭据。
-
-设置文件的 `node_id` 必须与该沙盒的绑定节点完全一致，若不一致，命令失败且不产生输出文件。当前仅校验人工提供的节点 ID 一致，不能证明人工填写的 IP、证书名和凭据确实属于该节点；正式连接必须从受信节点注册表取得这些信息。离线配置生成不构成生产节点身份授权。
-
-私有证书节点可在设置中加入 `"certificate_path": "/absolute/path/to/trusted-ca.pem"`，显式信任该 PEM 链，仍校验 `tls_server_name`，不会关闭证书验证。
-
-协议字段参考 [sing-box TUIC](https://sing-box.sagernet.org/configuration/outbound/tuic/) 和 [SOCKS inbound](https://sing-box.sagernet.org/configuration/inbound/socks/)。配置生成测试不代表已验证真实隧道、WebRTC、MTU 或 Windows DNS 无泄漏。
+本地 broker CLI 与 Windows 服务用的 `orangespace-runtime` 已随旧路线删除，见 git 历史与 [docs/archive](../docs/archive/README.md)。
