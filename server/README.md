@@ -1,10 +1,10 @@
 # OrangeSpace Linux 节点文件服务
 
-已实现可运行的个人文件 API、多用户本地账号、会话认证和文件系统隔离。新增默认关闭、管理员明确逐用户授权的短租约 TUIC 控制面和每租约独立 sing-box；设置、接口、部署前提及验证边界见 [TUNNELS.md](TUNNELS.md)。它不运行浏览器，不存储浏览器 Cookie；登录本身不授权联网。后续 Windows 文件面板及浏览器上传下载桥通过这里的文件 API 读写文件。
+已实现可运行的个人文件 API、多用户本地账号、会话认证和文件系统隔离。新增默认关闭、管理员明确逐用户授权的短租约 TUIC 控制面和每租约独立 sing-box；设置、接口、部署前提及验证边界见 [TUNNELS.md](TUNNELS.md)。它不运行浏览器，不存储浏览器 Cookie；登录本身不授权联网。Windows 客户端的“文件”窗口用这里的文件 API 读写节点上的个人文件，再经客体代理放入或取出沙盒的“下载”文件夹（见 [Windows 客户端](../apps/windows-client/README.md)）。
 
 ## 运行
 
-服务端目标为 Linux、Python 3.12+、MySQL 8.4 LTS / InnoDB / utf8mb4；节点与中心使用 SQLAlchemy 和显式 Alembic 迁移。Windows 本机沙盒元数据仍用 SQLite。旧服务端 SQLite/PostgreSQL 只保留为受控迁移源，不提供运行时回退；Windows 不支持这里的 POSIX 文件操作。
+服务端目标为 Linux、Python 3.12+、MySQL 8.4 LTS / InnoDB / utf8mb4；节点与中心使用 SQLAlchemy 和显式 Alembic 迁移。旧服务端 SQLite/PostgreSQL 只保留为受控迁移源，不提供运行时回退；Windows 不支持这里的 POSIX 文件操作。
 
 ```sh
 cd server
@@ -56,7 +56,7 @@ python3 -m venv .venv
 
 文件最大值默认为 1 GiB，可配置；即使未发送 `Content-Length`，仍在流式接收时计数。最多同时处理 8 个上传，其余返回 429。超过大小返回 413，存储空间不足返回 507。失败或取消不会发布半个文件。单文件上传尚不支持分片续传；下载支持单区间字节读取。
 
-Windows 客户端必须把文件任务绑定到创建时的 `node_id`、认证账号及沙盒任务目录。浏览器完成写入 Windows 临时文件后，才流式提交至本接口；收到 201 并核对大小、摘要与节点后才可标记任务已完成。浏览器文件选择器选中的远端文件，也先由客户端下载到该沙盒的临时目录。这个客户端桥接流程尚未由本服务单独实现。
+Windows 客户端把文件任务绑定到创建时的 `node_id`、认证账号和沙盒。存到节点时，先经客体代理把沙盒文件复制到该 Windows 用户的私有中转目录，再以固定长度流式提交至本接口，收到 201 才算完成；放入下载时先下载到中转目录，再交给沙盒。每个回复都核对 `X-OrangeSpace-Node` 是绑定的节点。
 
 ## 用户与文件隔离
 
@@ -88,4 +88,4 @@ Windows 客户端必须把文件任务绑定到创建时的 `node_id`、认证�
 
 当前源码仅支持 MySQL 正式运行，节点迁移 head 为 `node_0002`，中心为 `control_0008`。中心在 `server` 目录通过 `.venv/bin/alembic -c alembic-control.ini -x config=/etc/orangespace/control.json upgrade head` 显式迁移；节点 upgrade/verify 见上文。启动只检查版本，不自动迁移。
 
-最新完整验证（2026-11-21，局域网测试主机上的一次性 MySQL 容器）：真实 MySQL **8.4.13** 与已核验 sing-box **1.14.4**，**463 passed、0 skipped、0 failed，185.94 秒**。包含中心/节点 ASGI 与真实本地 TUIC 夹具，不能推断已部署、生产 HTTPS、Windows/WFP 或完整阶段验收。CI 必须在推送后按精确提交另查，不以本地通过替代。迁移边界见 [迁移说明](../docs/mysql-migration.md)，统一身份接口见 [控制面契约](../docs/control-plane-contract-v1.md)。
+最新完整验证（2026-11-22，局域网测试主机上的一次性 MySQL 容器）：真实 MySQL **8.4.13** 与已核验 sing-box **1.14.4**，**470 passed、0 skipped、0 failed，182.85 秒**。包含中心/节点 ASGI 与真实本地 TUIC 夹具，不能推断已部署、生产 HTTPS、Windows 实机或完整阶段验收。CI 必须在推送后按精确提交另查，不以本地通过替代。迁移边界见 [迁移说明](../docs/mysql-migration.md)，统一身份接口见 [控制面契约](../docs/control-plane-contract-v1.md)。
