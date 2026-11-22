@@ -73,6 +73,7 @@ std::string uuid4() {
 std::string reason(const std::exception& e) {
   if (const auto* s = dynamic_cast<const ns::HttpStatusError*>(&e)) return "node HTTP " + std::to_string(s->status_code());
   if (const auto* s = dynamic_cast<const ps::HttpStatusError*>(&e)) return "Centre HTTP " + std::to_string(s->status_code());
+  if (dynamic_cast<const ps::AccessExpired*>(&e)) return "Centre access expired";
   std::string text = e.what();
   return text.size() > 200 ? text.substr(0, 200) : text;
 }

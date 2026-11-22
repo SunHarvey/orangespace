@@ -1,6 +1,7 @@
 #include "orangespace/node_session.hpp"
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 
 namespace ns = orangespace::node_session;
@@ -23,6 +24,21 @@ int main() {
     http_rejection(status, [&] { (void)ns::detail::validate_login(node, status, node.node_id, rejected_body, 100); });
   http_rejection(403, [&] { (void)ns::detail::validate_me(node, 403, node.node_id, rejected_body); });
   http_rejection(401, [&] { (void)ns::detail::validate_session(node, identity, 401, node.node_id, rejected_body, 100); });
+  // Tunnel create and renew refusals (e.g. the Centre refusing a replayed
+  // generation) keep their status, so the caller can tell 401 from the rest.
+  const std::string tunnel_request = "{\"sandbox_id\":\"44444444-4444-4444-8444-444444444444\",\"generation\":1,\"tunnel_id\":\"55555555-5555-4555-8555-555555555555\"}";
+  for (unsigned status : {401u, 409u, 503u}) {
+    http_rejection(status, [&] { (void)ns::detail::validate_tunnel(node, identity, tunnel_request, status, node.node_id, rejected_body, 100, 200, std::string(43, 'a'), 1000, 1100); });
+    http_rejection(status, [&] { (void)ns::detail::validate_renew(node, "55555555-5555-4555-8555-555555555555", status, node.node_id, rejected_body, 100, 200, 1000, 1100); });
+  }
+  for (const auto& foreign : {std::string_view("33333333-3333-4333-8333-333333333333"), std::string_view()}) {
+    bool tunnel_foreign = false, renew_foreign = false;
+    try { (void)ns::detail::validate_tunnel(node, identity, tunnel_request, 409, foreign, rejected_body, 100, 200, std::string(43, 'a'), 1000, 1100); }
+    catch (const ns::HttpStatusError&) {} catch (const std::exception&) { tunnel_foreign = true; }
+    try { (void)ns::detail::validate_renew(node, "55555555-5555-4555-8555-555555555555", 409, foreign, rejected_body, 100, 200, 1000, 1100); }
+    catch (const ns::HttpStatusError&) {} catch (const std::exception&) { renew_foreign = true; }
+    if (!tunnel_foreign || !renew_foreign) throw std::runtime_error("a tunnel refusal from another node must not expose a status");
+  }
   bool untrusted_header_rejected = false;
   try { (void)ns::detail::validate_login(node, 401, "33333333-3333-4333-8333-333333333333", rejected_body, 100); }
   catch (const std::exception& error) { untrusted_header_rejected = std::string_view(error.what()) != "node HTTPS response rejected"; }

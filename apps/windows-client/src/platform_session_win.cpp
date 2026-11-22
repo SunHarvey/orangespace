@@ -118,7 +118,10 @@ Response checked_response(Response response,unsigned expected) {
   return response;
 }
 }
-void Session::live() const { require(!token_.view().empty() && identity_.expires_at>clock_()); }
+void Session::live() const {
+  require(!token_.view().empty());
+  if(identity_.expires_at<=clock_()) { if(renewable()) throw AccessExpired(); require(false); }
+}
 Response Session::request(std::string_view method,std::string_view path,std::string_view body,unsigned expected) {
   live(); return checked_response(transport_->request(bootstrap_,method,path,body,token_.view()),expected);
 }

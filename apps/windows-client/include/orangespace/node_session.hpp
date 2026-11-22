@@ -329,7 +329,9 @@ inline void lease_expiry(const json::Value& root, std::int64_t now, std::int64_t
 inline RenewResult validate_renew(const NodeEntry& node, std::string_view tunnel, unsigned status,
     std::string_view header, std::string_view input, std::int64_t now, std::int64_t session_expiry,
     std::int64_t started, std::int64_t received) {
-  require(uuid(tunnel) && status == 200 && header == node.node_id && input.size() <= 16384 && safe_utf8(input));
+  require(uuid(tunnel));
+  require_http_response(node, status, header, input.size());  // a refusal keeps its status
+  require(safe_utf8(input));
   exact_wire_integers(input);
   JsonGuard doc(input);
   object(doc.value, 5);
@@ -376,7 +378,8 @@ inline LeaseBudget validate_tunnel(const NodeEntry& node, const Identity& identi
     unsigned status, std::string_view header, std::string_view input, std::int64_t now,
     std::int64_t session_expiry, std::string_view api_token, std::int64_t started, std::int64_t received) {
   validate_tunnel_request(request);
-  require(status == 200 && header == node.node_id && input.size() <= 16384 && safe_utf8(input));
+  require_http_response(node, status, header, input.size());  // a refusal keeps its status
+  require(safe_utf8(input));
   exact_wire_integers(input);
   JsonGuard doc(input), asked(request);
   const auto& root = doc.value;

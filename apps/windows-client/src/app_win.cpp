@@ -111,7 +111,7 @@ std::wstring window_text(HWND h) {
 std::wstring hint(const std::string& error) {
   if (error.empty()) return L"";
   if (error.rfind("Centre HTTP 401", 0) == 0) return L"中心登录已失效，请退出后重新登录";
-  if (error.rfind("Centre HTTP", 0) == 0) return L"无法连接中心，正在重试";
+  if (error.rfind("Centre HTTP", 0) == 0 || error == "Centre access expired") return L"无法连接中心，正在重试";
   if (error.rfind("node HTTP 401", 0) == 0 || error.rfind("node HTTP 403", 0) == 0) return L"节点拒绝了本沙盒，正在重新授权";
   if (error.rfind("node HTTP", 0) == 0) return L"节点暂时不可用，正在重试（期间不联网）";
   if (error.find("grants no access") != std::string::npos || error.find("no tunnel grant") != std::string::npos)

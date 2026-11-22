@@ -141,6 +141,15 @@ if(WIN32)
       target_compile_options(orangespace-platform-remember-native-tests PRIVATE /UNDEBUG /utf-8)
     endif()
     add_test(NAME platform-credential-policy COMMAND orangespace-platform-credential-policy-tests)
+    # Manual acceptance against the real Centre and a node (tunnel replay); not in ctest.
+    add_executable(orangespace-tunnel-replay-check tests/tunnel_replay_native_win.cpp)
+    target_link_libraries(orangespace-tunnel-replay-check PRIVATE orangespace_node_session bcrypt)
+    if(MINGW)
+      target_link_options(orangespace-tunnel-replay-check PRIVATE -municode)
+    endif()
+    if(MSVC)
+      target_compile_options(orangespace-tunnel-replay-check PRIVATE /W4 /permissive- /utf-8)
+    endif()
     # Explicit headless fixture; native execution is opt-in, never on startup.
     add_executable(orangespace-file-directory-native-tests WIN32
       tests/file_transfer_directory_native_win.cpp src/file_transfer_win.cpp)

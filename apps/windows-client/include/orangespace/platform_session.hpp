@@ -27,6 +27,13 @@ class HttpStatusError final : public std::runtime_error {
   unsigned status_code() const noexcept { return status_; }
  private: unsigned status_;
 };
+// The access credential has expired by this computer's clock while the session
+// is still renewable: a refresh is due (for example the Centre could not be
+// reached when it was). Calls fail with this until a refresh succeeds.
+class AccessExpired final : public std::runtime_error {
+ public:
+  AccessExpired() : std::runtime_error("Centre access expired; waiting for renewal") {}
+};
 struct Bootstrap {
   std::string api_origin, host; std::uint16_t port{443};
   std::shared_ptr<const std::string> ca_pem{};

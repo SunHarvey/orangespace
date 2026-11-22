@@ -97,6 +97,20 @@ void refresh_flow() {
   // 401: the session has ended (revoked, or the refresh credential was reused).
   fake.refresh_status=401; failed=false; try{s.refresh();}catch(const HttpStatusError& e){failed=e.status_code()==401;} assert(failed && !s.renewable());
 }
+// The Centre was unreachable past the access expiry: calls say a renewal is
+// awaited, and work again once a refresh gets through. A session that can no
+// longer be renewed does not claim that.
+void expired_awaiting_renewal() {
+  auto config=detail::TestAccess::config(); Fake fake; std::int64_t now=1000; auto clock=[&now] {return now;};
+  auto s=Session::login(config,"alice","password-for-test",fake,clock);
+  now=5000; fake.offline=true;
+  bool awaited=false; try{(void)s.nodes();}catch(const AccessExpired&){awaited=true;} assert(awaited && fake.pages==0);
+  awaited=false; try{(void)s.issue(nid);}catch(const AccessExpired&){awaited=true;} assert(awaited);
+  bool failed=false; try{s.refresh();}catch(const std::runtime_error&){failed=true;} assert(failed && s.renewable());
+  fake.offline=false; s.refresh(); assert(s.identity().expires_at==6800 && s.nodes().size()==2);
+  now=6800; fake.refresh_status=401; failed=false; try{s.refresh();}catch(const HttpStatusError&){failed=true;} assert(failed && !s.renewable());
+  bool other=false; try{(void)s.nodes();}catch(const AccessExpired&){}catch(const std::runtime_error&){other=true;} assert(other);
+}
 // The Centre's clock is ahead: once it refuses a credential that is still
 // valid here, renewals follow its clock; once this clock is corrected, its own.
 void centre_lead() {
@@ -152,6 +166,7 @@ int main() {
     }
     session_flow();
     refresh_flow();
+    expired_awaiting_renewal();
     centre_lead();
     centre_follows_clock();
     centre_renews_on_refusal();
