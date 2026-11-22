@@ -30,6 +30,10 @@ class RuntimeError : public std::runtime_error {
 
 // %SystemRoot%\System32\wsl.exe if present, else empty.
 std::wstring wsl_executable();
+// WSL itself is installed and answers (`wsl.exe --version` exits 0). The
+// inbox System32\wsl.exe exists even where WSL was never installed and then
+// fails every command.
+bool wsl_ready();
 // Registered for the current user (HKCU\...\Lxss\{guid}\DistributionName).
 bool distribution_registered();
 // wsl --import OrangeSpace <install_dir> <rootfs> --version 2. Throws on failure.

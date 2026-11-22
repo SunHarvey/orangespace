@@ -58,6 +58,15 @@ std::wstring wsl_executable() {
   return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY) ? path : std::wstring{};
 }
 
+bool wsl_ready() {
+  if (wsl_executable().empty()) return false;
+  try {
+    return run_wsl({L"--version"}, 60000) == 0;
+  } catch (const RuntimeError&) {
+    return false;
+  }
+}
+
 bool distribution_registered() {
   HKEY lxss{};
   if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Lxss", 0,

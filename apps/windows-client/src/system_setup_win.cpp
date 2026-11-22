@@ -191,7 +191,10 @@ std::optional<SystemSetup> SystemSetup::for_this_install() {
 }
 
 void SystemSetup::run(const std::function<void(const std::wstring&)>& progress) {
-  if (wsl::wsl_executable().empty()) throw SetupError("本机还没有启用 WSL，请重新运行橙域安装程序");
+  if (!wsl::wsl_ready()) {
+    log_line("WSL is not installed or does not answer (wsl --version)");
+    throw SetupError("这台电脑还没有启用 WSL。请重新运行橙域安装程序，按提示重启电脑后再打开橙域。");
+  }
   const auto rootfs = folder_ / release_.rootfs;
   const auto image = folder_ / release_.image;
   const auto saved_tar = upgrade_dir() / L"userdata.tar";
@@ -214,7 +217,8 @@ void SystemSetup::run(const std::function<void(const std::wstring&)>& progress) 
     try {
       wsl::import_distribution(rootfs.wstring(), distro_dir().wstring());
     } catch (const wsl::RuntimeError& e) {
-      throw SetupError(std::string("导入橙域系统失败：") + e.what());
+      log_line(std::string("import failed: ") + e.what());
+      throw SetupError("导入橙域系统失败。如果刚启用了 WSL，请先重启电脑再打开橙域；仍然失败请查看 setup.log。");
     }
   };
   auto resume = [&] {

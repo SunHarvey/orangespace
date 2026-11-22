@@ -113,6 +113,10 @@ ReadyLabel1=安装程序已准备好在这台电脑上安装 [name]。
 ReadyLabel2a=点“安装”开始，或点“上一步”查看、修改设置。
 ReadyLabel2b=点“安装”开始。
 ReadyMemoDir=安装位置：
+ReadyMemoTasks=附加任务：
+WizardSelectTasks=选择附加任务
+SelectTasksDesc=要执行哪些附加任务？
+SelectTasksLabel2=选择安装 [name] 时要执行的附加任务，然后点“下一步”。
 WizardPreparing=正在准备安装
 PreparingDesc=安装程序正在准备在这台电脑上安装 [name]。
 PrepareToInstallNeedsRestart=需要先重新启动电脑。重启后请再次运行安装程序完成安装 [name]。%n%n要现在重新启动吗？
@@ -211,9 +215,11 @@ begin
   RestartNeeded := True;
 end;
 
+// Before the files are copied: Setup asks NeedRestart right after copying,
+// before ssPostInstall, so a restart decided any later would be lost.
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if (CurStep = ssPostInstall) and not WslReady() then
+  if (CurStep = ssInstall) and not WslReady() then
     EnableWsl();
 end;
 

@@ -33,7 +33,7 @@ scripts\build-release.ps1 -Rootfs <根文件系统> -Image <镜像归档> -Trust
 ## 安装包做什么
 
 - **检查**：Windows 10 22H2（19045）及以上的 x64；硬件虚拟化没有开启时拒绝安装并说明原因。
-- **启用 WSL**：`wsl --version` 不可用时运行 `wsl --install --no-distribution`，安装结束后要求重启。
+- **启用 WSL**：`wsl --version` 不可用时，在复制文件前运行 `wsl --install --no-distribution`（联网下载，几分钟）。完成页要求重启，默认“现在重新启动”，重启后再打开橙域。
 - **安装文件**：只装到 `Program Files\OrangeSpace`，不提供其他位置。安装目录归 Administrators，普通用户只读；`trust` 有自己的、不继承的 ACL。客户端拒绝普通用户能改动的信任文件。
 - **升级**：同一个 AppId 覆盖安装，整体替换 `system`、`trust`、`licenses`。客户端正在运行时安装程序会要求先关闭。
 
@@ -69,5 +69,6 @@ scripts\build-release.ps1 -Rootfs <根文件系统> -Image <镜像归档> -Trust
 ## 尚未覆盖
 
 - 安装包没有代码签名。
-- 启用 WSL 并重启这一步只在已启用 WSL 的机器上检查过检测逻辑。
+- 启用 WSL 并重启已在关闭 WSL 的虚拟机上验收；物理机和需要在固件里开启虚拟化的机器尚未测过。
+- 未签名、约 1 GB 的安装包第一次运行要等约 1 分钟才出现界面，看起来是在做安全扫描。
 - 没有自动更新，升级靠运行新版安装包。
