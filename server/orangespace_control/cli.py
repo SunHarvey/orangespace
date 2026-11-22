@@ -110,6 +110,22 @@ def list_nodes(engine):
                 for r in conn.execute(select(nodes).order_by(nodes.c.alias)).mappings()]
 
 
+def revoke_user_sessions(engine, name):
+    """Sign a user out everywhere (a lost device): every live session and its
+    refresh credential stop working; remembered sign-ins must sign in again."""
+    from .security import revoke_sessions
+    check_migration(engine)
+    with engine.begin() as conn:
+        authority_lock(conn)
+        user = conn.execute(select(users).where(users.c.username == username(name)).with_for_update()).mappings().first()
+        if user is None:
+            raise ValueError('unknown user')
+        receipt = revoke_sessions(conn, user['id'])
+        record_audit(conn, None, 'user.revoke_sessions', user['id'], user['user_epoch'], user['user_epoch'],
+                     'operator revocation', uid())
+        return receipt
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
@@ -129,6 +145,7 @@ def parse_args(argv=None):
     permit.add_argument('--scopes', default='tunnel,files.read,files.write')
     permit.add_argument('--disable', action='store_true')
     sub.add_parser('list-nodes')
+    sub.add_parser('revoke-sessions').add_argument('--username', required=True)
     serve = sub.add_parser('serve')
     serve.add_argument('--host', default='127.0.0.1')
     serve.add_argument('--port', type=int, default=8090)
@@ -167,6 +184,8 @@ def main():
         elif args.command == 'grant':
             scopes = [s for s in args.scopes.split(',') if s]
             print(json.dumps(grant(engine, args.username, args.alias, scopes, not args.disable)))
+        elif args.command == 'revoke-sessions':
+            print(json.dumps(revoke_user_sessions(engine, args.username)))
         elif args.command == 'list-nodes':
             print(json.dumps(list_nodes(engine), indent=1))
         else:

@@ -7,7 +7,7 @@ import uuid
 from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError, InvalidHashError
 from sqlalchemy import select, func
-from .schema_v1 import users, sessions, nodes, mappings, grants, audit, locks, rates
+from .schema_v1 import users, sessions, nodes, mappings, grants, audit, locks, rates, revocations
 
 PASSWORDS = PasswordHasher()
 DUMMY_HASH = PASSWORDS.hash(secrets.token_urlsafe(32))
@@ -75,6 +75,19 @@ def authority_lock(conn):
 def record_audit(conn, actor, action, object_id, before, after, reason, request_id):
     conn.execute(audit.insert().values(id=uid(), actor_id=actor, action=action, object_id=object_id,
                  before_revision=before, after_revision=after, created_at=now(), reason=reason, request_id=request_id))
+
+
+def revoke_sessions(conn, user_id, session_id=None):
+    """Revoke one session or every live session of a user; returns the receipt."""
+    stamp, rid = now(), uid()
+    query = sessions.update().where(sessions.c.user_id == user_id, sessions.c.revoked_at.is_(None))
+    if session_id is not None:
+        query = query.where(sessions.c.id == session_id)
+    conn.execute(query.values(revoked_at=stamp))
+    conn.execute(revocations.insert().values(id=rid, user_id=user_id, session_id=session_id, committed_at=stamp,
+                                             enforcement_deadline=stamp + 30, cleanup_state='pending'))
+    return {'schema': 1, 'revocation_id': show(rid), 'committed_at': stamp, 'enforcement_deadline': stamp + 30,
+            'cleanup_state': 'pending'}
 
 
 def authenticate(conn, authorization):

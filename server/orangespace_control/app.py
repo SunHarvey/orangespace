@@ -11,7 +11,7 @@ from .schema_v1 import users, sessions
 from .refresh_schema import refresh_tokens
 from .security import (ControlError, PASSWORDS, DUMMY_HASH, TOKEN, verify, now, uid, show,
                        canonical, username, user_dto, token_digest, refresh_digest, authenticate,
-                       authority_lock, throttle, eligible_nodes, record_audit)
+                       authority_lock, throttle, eligible_nodes, record_audit, revoke_sessions as revoke)
 
 # A refresh credential that was just used may be presented once more within this
 # window (the response was lost); the undelivered successor is then retired.
@@ -219,16 +219,6 @@ def create_app(config, engine=None):
         reason = data['reason']
         if type(epoch) is not int or not 1 <= epoch < 9007199254740991 or not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 512:
             raise ControlError(422, 'invalid_input')
-
-    def revoke(conn, user_id, session_id=None):
-        from .schema_v1 import revocations
-        stamp, rid = now(), uid()
-        query = sessions.update().where(sessions.c.user_id == user_id, sessions.c.revoked_at.is_(None))
-        if session_id is not None:
-            query = query.where(sessions.c.id == session_id)
-        conn.execute(query.values(revoked_at=stamp))
-        conn.execute(revocations.insert().values(id=rid, user_id=user_id, session_id=session_id, committed_at=stamp, enforcement_deadline=stamp + 30, cleanup_state='pending'))
-        return {'schema': 1, 'revocation_id': show(rid), 'committed_at': stamp, 'enforcement_deadline': stamp + 30, 'cleanup_state': 'pending'}
 
     @app.patch('/control/v1/admin/users/{user_id}')
     async def patch_user(user_id: str, request: Request):

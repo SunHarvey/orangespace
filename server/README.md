@@ -29,7 +29,7 @@ python3 -m venv .venv
 
 `ORANGESPACE_NODE_STATE=memory` 时节点不连数据库：会话、隧道授权和租约放在进程内存（SQLite 内存库，单锁串行），重启即清空。它必须同时配置 `ORANGESPACE_FEDERATION_CONFIG`，不能再设 `ORANGESPACE_DATABASE_CONFIG`。账户与授权以中心为准：首次换票时节点按中心票据建立本地身份（id 即中心用户 id，本地密码登录关闭）和隧道授权。节点 CLI 在此模式下只保留 `cleanup-uploads`。个人文件仍在 `ORANGESPACE_DATA_ROOT`，重启不丢。节点重启后旧隧道无法复活：中心按（节点、用户、沙盒）只认最新代次，并拒绝用过的 tunnel_id。安装与登记见 `linux-desktop/node/README.md`。
 
-中心运维命令（在中心主机上以服务账户运行，与控制台同锁、同审计）：`orangespace-control-admin create-user | enroll-node | activate-node | grant | list-nodes`。`create-user` 的密码在终端读取或从标准输入读一行；`enroll-node` 把一次性登记令牌打印到标准输出，供直接管道给节点的 `enroll-node`。
+中心运维命令（在中心主机上以服务账户运行，与控制台同锁、同审计）：`orangespace-control-admin create-user | enroll-node | activate-node | grant | list-nodes | revoke-sessions`。`create-user` 的密码在终端读取或从标准输入读一行；`enroll-node` 把一次性登记令牌打印到标准输出，供直接管道给节点的 `enroll-node`。`revoke-sessions --username <账号>` 让该账号在所有设备上下线（例如设备丢失）：所有会话及其刷新凭据立即失效，记住的登录也要重新输入密码，审计记为 `user.revoke_sessions`。
 
 ### 数据库模式
 

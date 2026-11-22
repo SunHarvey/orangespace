@@ -173,3 +173,28 @@ def test_node_federation_follows_the_renewed_session(control):
     assert validate(client, machine, federation).status_code == 200
     client.delete('/control/v1/sessions/' + first['central_session_id'], headers=bearer(second['access_token']))
     assert validate(client, machine, federation).status_code == 410
+
+
+def test_operator_revokes_every_session_of_a_user(control):
+    from orangespace_control.cli import revoke_user_sessions
+    client, engine, name, *_ = control
+    first, second = renewable(control), renewable(control)
+    receipt = revoke_user_sessions(engine, name)
+    assert receipt['cleanup_state'] == 'pending'
+    # Both sessions end, and neither refresh credential (a remembered sign-in)
+    # brings one back.
+    for data in (first, second):
+        assert not alive(client, data['access_token'])
+        assert refresh(client, data['refresh_token']).status_code == 401
+    with engine.connect() as c:
+        user_id = c.execute(select(sessions.c.user_id).where(sessions.c.id == canonical(first['central_session_id']))).scalar_one()
+        actions = c.execute(select(audit.c.action).where(audit.c.object_id == user_id)).scalars().all()
+    assert 'user.revoke_sessions' in actions
+    # A new password sign-in works again.
+    assert alive(client, renewable(control)['access_token'])
+    try:
+        revoke_user_sessions(engine, 'no-such-user')
+    except ValueError as error:
+        assert str(error) == 'unknown user'
+    else:
+        raise AssertionError('unknown user accepted')
