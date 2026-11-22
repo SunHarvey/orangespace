@@ -17,6 +17,7 @@
 #include "orangespace/sandbox_status.hpp"
 #include "orangespace/wsl_runtime.hpp"
 
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <map>
@@ -38,8 +39,12 @@ class Centre final : public platform_session::SharedCentre {
   // log: optional, one secret-free line per refresh event, from the refresher.
   // refreshed: optional, called with the lock held right after each refresh
   // (to save the new renewal when the sign-in is remembered).
+  // check_every: how often the refresher looks at the session's clock. Windows
+  // timeouts do not count time asleep, so one long wait could end long after
+  // the access credential expired; short waits renew soon after a resume.
   explicit Centre(platform_session::Session session, std::function<void(const std::string&)> log = {},
-                  std::function<void(const platform_session::Session&)> refreshed = {});
+                  std::function<void(const platform_session::Session&)> refreshed = {},
+                  std::chrono::milliseconds check_every = std::chrono::seconds(15));
   ~Centre() override;
   Centre(const Centre&) = delete;
   Centre& operator=(const Centre&) = delete;
@@ -50,12 +55,16 @@ class Centre final : public platform_session::SharedCentre {
 
  private:
   void keep_fresh() noexcept;
+  void renew_locked();  // refresh, log, and save the new renewal; mutex_ held
+  template <class F>
+  auto with_renewal(F f) -> decltype(f());  // mutex_ held
   mutable std::mutex mutex_;
   std::condition_variable wake_;
   bool closing_{false};
   platform_session::Session session_;
   std::function<void(const std::string&)> log_;
   std::function<void(const platform_session::Session&)> refreshed_;
+  std::chrono::milliseconds check_every_;
   std::thread refresher_;
 };
 

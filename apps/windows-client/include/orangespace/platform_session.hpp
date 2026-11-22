@@ -109,7 +109,13 @@ class Session {
   // a few minutes); HTTP 401 means the session has ended.
   bool renewable() const noexcept { return !refresh_.view().empty(); }
   std::int64_t renew_at() const noexcept { return renew_at_; }
+  // Seconds until renew_at() by this session's clock (0 when due).
+  std::int64_t renew_in() const { const auto left = renew_at_ - clock_(); return left > 0 ? left : 0; }
   void refresh();
+  // The Centre refused the access credential (401) before its expiry by this
+  // clock: the Centre's clock is ahead by at least the time left here. Later
+  // renewals are scheduled that much earlier.
+  void expired_at_centre() noexcept;
   // Serialization only: no central DPAPI persistence is implemented here.
   // Parent must use a separate central namespace/entropy/file, never old blobs.
   SerializedSecret export_envelope() const;
@@ -129,6 +135,7 @@ class Session {
   SerializedSecret token_;
   SerializedSecret refresh_;
   std::int64_t renew_at_{}, refresh_expires_at_{};
+  std::int64_t centre_lead_{};  // seconds the Centre's clock is known to be ahead
   Transport* transport_;
   std::function<std::int64_t()> clock_;
 };

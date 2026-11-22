@@ -1,4 +1,8 @@
 #include "orangespace/platform_session.hpp"
+#include "orangespace/sandbox_engine.hpp"
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include <iostream>
 #include <cassert>
 using namespace orangespace::platform_session;
@@ -13,6 +17,7 @@ struct Fake final : Transport {
   int pages=0, deletes=0, refreshes=0; bool repeat=false, change=false, large=false, bad_logout=false, offline=false, past_deadline=false; unsigned status=200, refresh_status=200;
   // The Centre rotates both credentials on each refresh: access 'A'+n, refresh 'R'+n.
   char access='A', renewal='R'; int expiry=5000;
+  char stale=0;  // the Centre's clock is ahead: this access credential has already expired there
   Response request(const Bootstrap& b, std::string_view method, std::string_view path, std::string_view body, std::string_view bearer) override {
     assert(b.api_origin=="https://centre.example.test");
     if(path=="/control/v1/auth/refresh") {
@@ -24,6 +29,7 @@ struct Fake final : Transport {
     }
     if(status!=200) return {status,SerializedSecret("secret backend failure")};
     if(path=="/control/v1/auth/login") { assert(body.find("\"schema\":1")!=body.npos && body.find("\"renewable\":true")!=body.npos); return {200,SerializedSecret("{"+metadata(expiry)+",\"access_token\":\""+std::string(43,access)+"\",\"token_type\":\"bearer\",\"nodes\":[],\"nodes_next_cursor\":null,\"session_deadline\":90000,\"refresh_token\":\""+std::string(43,renewal)+"\",\"refresh_expires_at\":60000}")}; }
+    if(stale && bearer==std::string(43,stale)) return {401,SerializedSecret("{}")};
     assert(bearer==std::string(43,access));
     if(path=="/control/v1/session") { auto data="{"+metadata(expiry)+"}"; if(change) data.replace(data.find(uid),uid.size(),legacy); return {200,SerializedSecret(data)}; }
     if(large && path.starts_with("/control/v1/me/nodes")) {
@@ -91,6 +97,52 @@ void refresh_flow() {
   // 401: the session has ended (revoked, or the refresh credential was reused).
   fake.refresh_status=401; failed=false; try{s.refresh();}catch(const HttpStatusError& e){failed=e.status_code()==401;} assert(failed && !s.renewable());
 }
+// The Centre's clock is ahead: once it refuses a credential that is still
+// valid here, renewals follow its clock; once this clock is corrected, its own.
+void centre_lead() {
+  auto config=detail::TestAccess::config(); Fake fake; std::int64_t now=1000; auto clock=[&now] {return now;};
+  auto s=Session::login(config,"alice","password-for-test",fake,clock);
+  s.expired_at_centre();  // refused at 1000 here, expiry 5000: the Centre is at least 4000 s ahead
+  s.refresh(); assert(s.identity().expires_at==6800 && s.renew_at()==1900);
+  now=5000;  // this clock was corrected: the lead no longer fits a fresh credential
+  s.refresh(); assert(s.identity().expires_at==8600 && s.renew_at()==6800);
+}
+// The window's Centre renews on the session's clock, not on how long it has
+// waited: after a sleep (Windows timeouts do not count time asleep) or a clock
+// jump past renew_at it refreshes within one check, not after the old wait.
+void centre_follows_clock() {
+  using namespace std::chrono_literals;
+  auto config=detail::TestAccess::config(); Fake fake; std::atomic<std::int64_t> now{1000}; auto clock=[&now] {return now.load();};
+  auto s=Session::login(config,"alice","password-for-test",fake,clock);
+  assert(s.renew_at()==3000 && s.renew_in()==2000);
+  orangespace::sandbox::Centre centre(std::move(s),{},{},50ms);
+  std::this_thread::sleep_for(300ms);
+  assert(centre.identity().expires_at==5000);  // not due yet: nothing sent
+  now=4000;  // the machine slept past renew_at (access expires at 5000)
+  const auto give_up=std::chrono::steady_clock::now()+3s;
+  while(centre.identity().expires_at==5000 && std::chrono::steady_clock::now()<give_up) std::this_thread::sleep_for(20ms);
+  assert(centre.identity().expires_at==6800);
+}
+// This machine's clock is behind the Centre's: a call is refused (401) while
+// the access credential still looks valid here. The Centre renews at once and
+// the call succeeds; if the refresh is refused too, the 401 stands.
+void centre_renews_on_refusal() {
+  using namespace std::chrono_literals;
+  auto config=detail::TestAccess::config(); Fake fake; std::atomic<std::int64_t> now{1000}; auto clock=[&now] {return now.load();};
+  orangespace::sandbox::Centre centre(Session::login(config,"alice","password-for-test",fake,clock),{},{},50ms);
+  fake.stale='A';
+  const auto refs=centre.nodes();
+  assert(refs.size()==2 && fake.refreshes==1 && centre.identity().expires_at==6800);
+  (void)centre.issue(nid);  // the renewed credential is in use
+  // The next renewal follows the Centre's clock (lead 4000 s): due at 1900 here, not 3900.
+  now=1950;
+  const auto give_up=std::chrono::steady_clock::now()+3s;
+  while(centre.identity().expires_at==6800 && std::chrono::steady_clock::now()<give_up) std::this_thread::sleep_for(20ms);
+  assert(centre.identity().expires_at==8600);
+  fake.stale='C'; fake.refresh_status=401;
+  bool refused=false; try{(void)centre.nodes();}catch(const HttpStatusError& e){refused=e.status_code()==401;}
+  assert(refused && fake.refreshes==2);
+}
 int main() {
   try {
     auto b = detail::validate_bootstrap(R"({"schema":1,"api_origin":"https://centre.example.test"})");
@@ -100,6 +152,9 @@ int main() {
     }
     session_flow();
     refresh_flow();
+    centre_lead();
+    centre_follows_clock();
+    centre_renews_on_refusal();
     std::cout << "platform bootstrap/session/pagination/identity tests passed\n";
   } catch (const std::exception&) { std::cerr << "platform bootstrap test failed\n"; return 1; }
 }

@@ -39,11 +39,14 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -143,6 +146,22 @@ std::string load_probe(const fs::path& path) {
     }
   }
   return out + "}";
+}
+
+// One line per event in client.log, prefixed with the local time. Events only
+// (tunnel IDs, generations, reasons), never credentials. Lines come from the
+// refresher and every sandbox worker, so writes are serialized.
+std::function<void(const std::string&)> event_log(fs::path path) {
+  return [path = std::move(path)](const std::string& line) {
+    static std::mutex lock;
+    SYSTEMTIME t{};
+    GetLocalTime(&t);
+    char stamp[32];
+    std::snprintf(stamp, sizeof stamp, "%04u-%02u-%02u %02u:%02u:%02u ", t.wYear, t.wMonth, t.wDay, t.wHour,
+                  t.wMinute, t.wSecond);
+    std::lock_guard guard(lock);
+    std::ofstream(path, std::ios::app | std::ios::binary) << stamp << line << "\n";
+  };
 }
 
 fs::path user_directory(const std::string& central_user_id) {
@@ -381,7 +400,7 @@ class App {
         refreshed = [platform = platform_](const ps::Session& s) { ps::CredentialStore::save(*platform, s); };
       centre_ = std::make_shared<sb::Centre>(
           std::move(*result->session),
-          [log_path](const std::string& line) { std::ofstream(log_path, std::ios::app | std::ios::binary) << line << "\n"; },
+          event_log(log_path),
           std::move(refreshed));
     }
     nodes_ = std::move(result->nodes);
@@ -550,11 +569,7 @@ class App {
 
   void make_engine() {
     if (engine_ || !agent_ || !centre_ || !catalog_) return;
-    const auto log_path = directory_ / L"client.log";
-    auto log = [log_path](const std::string& line) {
-      // Events only (tunnel IDs, generations, reasons); never credentials.
-      std::ofstream(log_path, std::ios::app | std::ios::binary) << line << "\n";
-    };
+    const auto log = event_log(directory_ / L"client.log");
     engine_ = std::make_unique<sb::Engine>(*catalog_, *centre_, *agent_, probe_, log);
     guest_files_ = std::make_unique<sb::GuestFiles>(*agent_, centre_->identity().central_user_id);
     files_windows_ = std::make_unique<sb::FilesWindows>(window_, *guest_files_, log);

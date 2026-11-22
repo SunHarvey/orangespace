@@ -141,8 +141,17 @@ Session Session::login(const PlatformConfig& config, std::string_view username, 
   result.refresh_=SerializedSecret(renewal); result.refresh_expires_at_=renewal_expiry; result.schedule();
   result.revalidate(); return result;
 }
-// Renew once half of the access lifetime is gone.
-void Session::schedule() { const auto now=clock_(); renew_at_=now+(std::max<std::int64_t>)(0,(identity_.expires_at-now)/2); }
+// Renew once half of the access lifetime is gone, by the Centre's clock as far
+// as it is known here. A fresh credential always has life left at the Centre;
+// if the known lead says otherwise, this clock has been corrected since: drop it.
+void Session::schedule() {
+  const auto now=clock_(); auto left=identity_.expires_at-(now+centre_lead_);
+  if(left<=0) { centre_lead_=0; left=identity_.expires_at-now; }
+  renew_at_=now+(std::max<std::int64_t>)(0,left/2);
+}
+void Session::expired_at_centre() noexcept {
+  const auto lead=identity_.expires_at-clock_(); if(lead>centre_lead_) centre_lead_=lead;
+}
 void Session::refresh() {
   require(renewable() && identity_.deadline>clock_());
   SecretText body; body.text="{\"schema\":1,\"refresh_token\":"; quote(body.text,refresh_.view()); body.text+='}';

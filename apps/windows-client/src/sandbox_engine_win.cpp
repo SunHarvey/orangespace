@@ -89,8 +89,11 @@ std::string text_or_empty(const json::Value& v, std::string_view key) {
 }  // namespace
 
 Centre::Centre(ps::Session session, std::function<void(const std::string&)> log,
-               std::function<void(const ps::Session&)> refreshed)
-    : session_(std::move(session)), log_(std::move(log)), refreshed_(std::move(refreshed)) {
+               std::function<void(const ps::Session&)> refreshed, std::chrono::milliseconds check_every)
+    : session_(std::move(session)),
+      log_(std::move(log)),
+      refreshed_(std::move(refreshed)),
+      check_every_(check_every) {
   refresher_ = std::thread([this] { keep_fresh(); });
 }
 
@@ -108,24 +111,56 @@ void Centre::keep_fresh() noexcept {
   constexpr auto kRetry = std::chrono::seconds(20);
   std::unique_lock lock(mutex_);
   while (!closing_ && session_.renewable()) {
-    const auto wait = std::chrono::seconds((std::max<std::int64_t>)(0, session_.renew_at() - unix_seconds()));
-    if (wake_.wait_for(lock, wait, [&] { return closing_; })) break;
+    // Wait in short steps and look at the clock again after each, so a sleep
+    // or a clock change never delays the renewal by more than one step.
+    if (const auto left = session_.renew_in(); left > 0) {
+      const auto wait = (std::min)(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::seconds(left)),
+                                   check_every_);
+      if (wake_.wait_for(lock, wait, [&] { return closing_; })) break;
+      continue;
+    }
     try {
-      session_.refresh();
-      if (log_) log_("Centre session refreshed");
-      if (refreshed_) {
-        try {
-          refreshed_(session_);
-        } catch (const std::exception& e) {
-          if (log_) log_("saving the refreshed sign-in failed: " + reason(e));
-        }
-      }
-    } catch (const std::exception& e) {
-      if (log_) log_("Centre session refresh failed: " + reason(e));
+      renew_locked();
+    } catch (const std::exception&) {
       if (!session_.renewable()) break;  // the Centre refused: the session has ended
       if (wake_.wait_for(lock, kRetry, [&] { return closing_; })) break;
     }
   }
+}
+
+void Centre::renew_locked() {
+  try {
+    session_.refresh();
+  } catch (const std::exception& e) {
+    if (log_) log_("Centre session refresh failed: " + reason(e));
+    throw;
+  }
+  if (log_) log_("Centre session refreshed");
+  if (refreshed_) {
+    try {
+      refreshed_(session_);
+    } catch (const std::exception& e) {
+      if (log_) log_("saving the refreshed sign-in failed: " + reason(e));
+    }
+  }
+}
+
+// The Centre answers 401 once the access credential has expired by its clock.
+// When this machine's clock is behind (no time sync, or not yet corrected
+// after a resume) the refresher thinks renewal is not due yet; renew now and
+// try once more. If the Centre refuses the refresh too, the session has ended.
+template <class F>
+auto Centre::with_renewal(F f) -> decltype(f()) {
+  try {
+    return f();
+  } catch (const ps::HttpStatusError& e) {
+    if (e.status_code() != 401 || !session_.renewable()) throw;
+    if (log_) log_("Centre refused the access credential before its expiry here; renewing now");
+    session_.expired_at_centre();
+  }
+  renew_locked();
+  wake_.notify_all();  // the refresher picks up the new schedule
+  return f();
 }
 
 ps::CentralIdentity Centre::identity() const {
@@ -135,13 +170,15 @@ ps::CentralIdentity Centre::identity() const {
 
 std::vector<ps::NodeRef> Centre::nodes() {
   std::lock_guard lock(mutex_);
-  return session_.nodes();
+  return with_renewal([&] { return session_.nodes(); });
 }
 
 ps::ExchangeTicket Centre::issue(std::string_view node_id) {
   std::lock_guard lock(mutex_);
-  session_.revalidate();
-  return session_.issue(node_id);
+  return with_renewal([&] {
+    session_.revalidate();
+    return session_.issue(node_id);
+  });
 }
 
 void Centre::logout() {
