@@ -91,6 +91,11 @@ class Session {
   // Single-threaded: serialize logout/revalidate/issue with UI work.
   static Session login(const PlatformConfig&, std::string_view, std::string_view, Transport&, std::function<std::int64_t()> clock);
   static Session restore(const PlatformConfig&, std::string_view, Transport&, std::function<std::int64_t()> clock);
+  // Signs in again from a saved renewal (export_renewal): one refresh against
+  // the Centre, which must name the same user, session, epoch and deadline.
+  // The saved renewal is used up; save the returned session's renewal at once.
+  static Session resume(const PlatformConfig&, std::string_view renewal);
+  static Session resume(const PlatformConfig&, std::string_view renewal, Transport&, std::function<std::int64_t()> clock);
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;
   Session(Session&&) noexcept = default;
@@ -108,6 +113,9 @@ class Session {
   // Serialization only: no central DPAPI persistence is implemented here.
   // Parent must use a separate central namespace/entropy/file, never old blobs.
   SerializedSecret export_envelope() const;
+  // The refresh credential and the identity it renews, for remembering a
+  // sign-in. Changes on every refresh; only the latest one works.
+  SerializedSecret export_renewal() const;
   std::vector<NodeRef> nodes(); // All pages or an error, never a partial success.
   ExchangeTicket issue(std::string_view canonical_node_id);
   void logout(); // Remote 202 = revocation accepted, not forwarding stopped.
@@ -120,7 +128,7 @@ class Session {
   CentralIdentity identity_;
   SerializedSecret token_;
   SerializedSecret refresh_;
-  std::int64_t renew_at_{};
+  std::int64_t renew_at_{}, refresh_expires_at_{};
   Transport* transport_;
   std::function<std::int64_t()> clock_;
 };

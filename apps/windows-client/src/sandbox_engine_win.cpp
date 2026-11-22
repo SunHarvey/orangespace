@@ -88,8 +88,9 @@ std::string text_or_empty(const json::Value& v, std::string_view key) {
 }
 }  // namespace
 
-Centre::Centre(ps::Session session, std::function<void(const std::string&)> log)
-    : session_(std::move(session)), log_(std::move(log)) {
+Centre::Centre(ps::Session session, std::function<void(const std::string&)> log,
+               std::function<void(const ps::Session&)> refreshed)
+    : session_(std::move(session)), log_(std::move(log)), refreshed_(std::move(refreshed)) {
   refresher_ = std::thread([this] { keep_fresh(); });
 }
 
@@ -112,6 +113,13 @@ void Centre::keep_fresh() noexcept {
     try {
       session_.refresh();
       if (log_) log_("Centre session refreshed");
+      if (refreshed_) {
+        try {
+          refreshed_(session_);
+        } catch (const std::exception& e) {
+          if (log_) log_("saving the refreshed sign-in failed: " + reason(e));
+        }
+      }
     } catch (const std::exception& e) {
       if (log_) log_("Centre session refresh failed: " + reason(e));
       if (!session_.renewable()) break;  // the Centre refused: the session has ended

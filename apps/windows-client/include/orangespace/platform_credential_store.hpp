@@ -1,6 +1,7 @@
 #pragma once
 #include "orangespace/platform_session.hpp"
 #include <algorithm>
+#include <optional>
 
 namespace orangespace::platform_session {
 namespace credential_detail {
@@ -25,33 +26,48 @@ inline std::string entropy(std::string_view sid, std::string_view api_origin) {
   result.push_back('\0'); result += api_origin;
   return result;
 }
-// Central's eight-field envelope is NOT the legacy node envelope. Parsing here
-// is a persistence admission check, never authentication. load calls restore.
-inline void validate_envelope(std::string_view api_origin, std::string_view input, std::int64_t now) {
+// The stored item is a session renewal (Session::export_renewal), never an
+// access credential. Parsing here is a persistence admission check, never
+// authentication: load signs in again through Session::resume.
+inline void validate_renewal(std::string_view api_origin, std::string_view input, std::int64_t now) {
   namespace nd = node_session::detail;
   (void)validate_origin(api_origin);
   nd::require(!input.empty() && input.size() <= 16384 && nd::safe_utf8(input));
   nd::exact_wire_integers(input);
-  nd::JsonGuard doc(input); nd::object(doc.value, 8);
+  nd::JsonGuard doc(input); nd::object(doc.value, 11);
   nd::require(nd::integer(nd::field(doc.value, "schema")) == 1);
-  nd::require(nd::text(nd::field(doc.value, "namespace")) == "orangespace.platform.session");
+  nd::require(nd::text(nd::field(doc.value, "namespace")) == "orangespace.platform.renewal");
   nd::require(nd::text(nd::field(doc.value, "api_origin")) == api_origin);
   nd::require(nd::uuid(nd::text(nd::field(doc.value, "central_user_id"))) &&
               nd::uuid(nd::text(nd::field(doc.value, "central_session_id"))));
+  (void)nd::text(nd::field(doc.value, "username")); (void)nd::text(nd::field(doc.value, "role"));
   (void)nd::integer(nd::field(doc.value, "user_epoch"));
-  nd::require(nd::integer(nd::field(doc.value, "expires_at")) > now);
-  nd::validate_token(nd::text(nd::field(doc.value, "access_token")));
+  const auto deadline = nd::integer(nd::field(doc.value, "session_deadline"));
+  const auto expiry = nd::integer(nd::field(doc.value, "refresh_expires_at"));
+  nd::require(deadline > now && expiry > now && expiry <= deadline);
+  nd::validate_token(nd::text(nd::field(doc.value, "refresh_token")));
 }
 } // namespace credential_detail
 
 // Interactive current-user DPAPI only, fixed product root and SHA-256(origin)
 // storage key. No arbitrary path, caller SID, node ID or LocalMachine option.
 // A failed erase is NOT completed logout: preserve/retry its pending marker.
+//
+// Remember-login: save stores the session's current renewal (replace it after
+// every refresh: only the latest works). load returns nothing when nothing is
+// saved; otherwise it signs in again through Session::resume and saves the new
+// renewal before returning. A saved item that is invalid, expired or refused by
+// the Centre (HTTP 401/403) is erased; a network or server failure keeps it for
+// the next attempt and throws SavedSignInKept.
+class SavedSignInKept final : public std::runtime_error {
+ public:
+  SavedSignInKept() : std::runtime_error("the Centre could not be reached; the saved sign-in is kept") {}
+};
 class CredentialStore {
  public:
   static void save(const PlatformConfig&, const Session&);
-  // Decryption alone never signs in: restore performs real central revalidation.
-  static Session load(const PlatformConfig&);
+  static std::optional<Session> load(const PlatformConfig&);
+  static std::optional<Session> load(const PlatformConfig&, Transport&, std::function<std::int64_t()> clock);
   static void erase(const PlatformConfig&);
 };
 } // namespace orangespace::platform_session

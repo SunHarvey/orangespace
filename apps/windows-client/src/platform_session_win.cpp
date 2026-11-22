@@ -138,7 +138,7 @@ Session Session::login(const PlatformConfig& config, std::string_view username, 
   std::vector<NodeRef> initial;page_items(doc.value,"nodes",initial); const auto next=cursor(doc.value,"nodes_next_cursor");
   require(next.empty() || (!initial.empty() && next==initial.back().node_id));
   Session result(config.bootstrap_,std::move(i),SerializedSecret(token),transport,std::move(clock));
-  result.refresh_=SerializedSecret(renewal); result.schedule();
+  result.refresh_=SerializedSecret(renewal); result.refresh_expires_at_=renewal_expiry; result.schedule();
   result.revalidate(); return result;
 }
 // Renew once half of the access lifetime is gone.
@@ -157,7 +157,36 @@ void Session::refresh() {
   require(nd::integer(nd::field(doc.value,"session_deadline"))==identity_.deadline && i.expires_at<=identity_.deadline);
   const auto renewal_expiry=nd::integer(nd::field(doc.value,"refresh_expires_at"));
   require(renewal_expiry>clock_() && renewal_expiry<=identity_.deadline);
-  token_=SerializedSecret(token); refresh_=SerializedSecret(renewal); identity_.expires_at=i.expires_at; schedule();
+  token_=SerializedSecret(token); refresh_=SerializedSecret(renewal); refresh_expires_at_=renewal_expiry; identity_.expires_at=i.expires_at; schedule();
+}
+SerializedSecret Session::export_renewal() const {
+  require(renewable() && identity_.deadline>clock_() && refresh_expires_at_>clock_());
+  SecretText text; text.text.reserve(1024);
+  text.text="{\"schema\":1,\"namespace\":\"orangespace.platform.renewal\",\"api_origin\":";quote(text.text,bootstrap_.api_origin);
+  text.text+=",\"central_user_id\":";quote(text.text,identity_.central_user_id);
+  text.text+=",\"central_session_id\":";quote(text.text,identity_.central_session_id);
+  text.text+=",\"username\":";quote(text.text,identity_.username);
+  text.text+=",\"role\":";quote(text.text,identity_.role);
+  text.text+=",\"user_epoch\":"+std::to_string(identity_.user_epoch)+",\"session_deadline\":"+std::to_string(identity_.deadline);
+  text.text+=",\"refresh_expires_at\":"+std::to_string(refresh_expires_at_)+",\"refresh_token\":";
+  quote(text.text,refresh_.view());text.text+='}'; return SerializedSecret(text.text);
+}
+Session Session::resume(const PlatformConfig& config,std::string_view input,Transport& transport,std::function<std::int64_t()> clock) {
+  wire(input);nd::JsonGuard doc(input);schema(doc.value,11);
+  require(nd::text(nd::field(doc.value,"namespace"))=="orangespace.platform.renewal" && nd::text(nd::field(doc.value,"api_origin"))==config.api_origin());
+  CentralIdentity i;
+  i.central_user_id=nd::text(nd::field(doc.value,"central_user_id"));i.central_session_id=nd::text(nd::field(doc.value,"central_session_id"));
+  i.username=nd::text(nd::field(doc.value,"username"));i.role=nd::text(nd::field(doc.value,"role"));
+  i.user_epoch=nd::integer(nd::field(doc.value,"user_epoch"));i.deadline=nd::integer(nd::field(doc.value,"session_deadline"));
+  const auto renewal_expiry=nd::integer(nd::field(doc.value,"refresh_expires_at"));
+  const auto& renewal=nd::text(nd::field(doc.value,"refresh_token"));nd::validate_token(renewal);
+  require(nd::uuid(i.central_user_id) && nd::uuid(i.central_session_id) && (i.role=="user" || i.role=="admin"));
+  require(!i.username.empty() && i.username.size()<=256 && nd::safe_utf8(i.username,true));
+  const auto now=clock(); require(i.deadline>now && renewal_expiry>now && renewal_expiry<=i.deadline);
+  // No access credential yet: refresh() issues one for exactly this identity.
+  Session result(config.bootstrap_,std::move(i),SerializedSecret(),transport,std::move(clock));
+  result.refresh_=SerializedSecret(renewal); result.refresh_expires_at_=renewal_expiry;
+  result.refresh(); return result;  // the refresh reply is the Centre's authoritative identity
 }
 void Session::revalidate() {
   auto r=request("GET","/control/v1/session",{},200);wire(r.body.view());nd::JsonGuard doc(r.body.view());schema(doc.value,4);
@@ -231,6 +260,9 @@ Session Session::login(const PlatformConfig& config,std::string_view user,std::s
 }
 Session Session::restore(const PlatformConfig& config,std::string_view envelope) {
   return restore(config,envelope,windows_transport(),wall_seconds);
+}
+Session Session::resume(const PlatformConfig& config,std::string_view renewal) {
+  return resume(config,renewal,windows_transport(),wall_seconds);
 }
 #endif
 void Session::logout() {

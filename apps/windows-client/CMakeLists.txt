@@ -131,6 +131,16 @@ if(WIN32)
       target_compile_options(orangespace-platform-session-tests PRIVATE /UNDEBUG /utf-8)
     endif()
     add_test(NAME platform-session COMMAND orangespace-platform-session-tests)
+    add_executable(orangespace-platform-credential-policy-tests tests/platform_credential_store_policy_tests.cpp)
+    target_link_libraries(orangespace-platform-credential-policy-tests PRIVATE orangespace_node_session)
+    # Explicit desktop-session fixture (the store refuses session 0); not in ctest.
+    add_executable(orangespace-platform-remember-native-tests tests/platform_remember_native_win.cpp)
+    target_link_libraries(orangespace-platform-remember-native-tests PRIVATE orangespace_node_session)
+    if(MSVC)
+      target_compile_options(orangespace-platform-credential-policy-tests PRIVATE /UNDEBUG /utf-8)
+      target_compile_options(orangespace-platform-remember-native-tests PRIVATE /UNDEBUG /utf-8)
+    endif()
+    add_test(NAME platform-credential-policy COMMAND orangespace-platform-credential-policy-tests)
     # Explicit headless fixture; native execution is opt-in, never on startup.
     add_executable(orangespace-file-directory-native-tests WIN32
       tests/file_transfer_directory_native_win.cpp src/file_transfer_win.cpp)

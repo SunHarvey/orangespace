@@ -469,18 +469,22 @@ void CredentialStore::save(const PlatformConfig& config, const Session& session)
   Directory directory(StoreKind::platform);
   NodeLock lock(directory, key, false);
   require_not_pending(directory, key);
-  const auto envelope = session.export_envelope();
-  credential_detail::validate_envelope(config.api_origin(), envelope.view(), now());
-  const auto blob = encrypt(envelope.view(), directory.scope(key));
+  const auto renewal = session.export_renewal();
+  credential_detail::validate_renewal(config.api_origin(), renewal.view(), now());
+  const auto blob = encrypt(renewal.view(), directory.scope(key));
   atomic_write(directory, key, blob);
 }
-Session CredentialStore::load(const PlatformConfig& config) {
+namespace {
+std::optional<Session> load_renewal(const PlatformConfig& config,
+                                    const std::function<Session(std::string_view)>& resume) {
   const auto key = storage_key(config);
   Directory directory(StoreKind::platform);
   NodeLock lock(directory, key, false);
   require_not_pending(directory, key);
   auto file = directory.open(key);
-  checked(file != nullptr);
+  if (!file) return std::nullopt;
+  std::optional<Session> session;
+  bool kept = false;
   try {
     verify_object(file.get(), false); verify_acl(file.get(), directory.user, false);
     LARGE_INTEGER size{};
@@ -490,16 +494,39 @@ Session CredentialStore::load(const PlatformConfig& config) {
     checked(ReadFile(file.get(), encrypted.bytes.data(), static_cast<DWORD>(encrypted.bytes.size()), &count, nullptr) != FALSE && count == encrypted.bytes.size());
     directory.verify(); verify_acl(file.get(), directory.user, false);
     const auto plaintext = decrypt(encrypted.bytes, directory.scope(key));
-    const std::string_view envelope(reinterpret_cast<const char*>(plaintext.value.pbData), plaintext.value.cbData);
-    credential_detail::validate_envelope(config.api_origin(), envelope, now());
-    return Session::restore(config, envelope);
+    const std::string_view renewal(reinterpret_cast<const char*>(plaintext.value.pbData), plaintext.value.cbData);
+    credential_detail::validate_renewal(config.api_origin(), renewal, now());
+    try {
+      session.emplace(resume(renewal));
+    } catch (const HttpStatusError& e) {
+      if (e.status_code() == 401 || e.status_code() == 403) throw;  // refused: erase below
+      kept = true;
+    } catch (const std::exception&) {
+      // Network failure or an unexpected reply: the renewal may still be
+      // unused (or inside the Centre's retry window), so keep it.
+      kept = true;
+    }
   } catch (...) {
     file.reset();
-    // Invalid/expired/revoked credentials use the existing durable transaction.
-    // Any failure leaves its marker intact; never hide the original failure.
+    // Invalid, expired or refused: erase with the durable transaction. Any
+    // failure leaves its marker intact; never hide the original failure.
     try {erase_pending(directory, key);} catch (...) {}
     throw;
   }
+  if (kept) throw SavedSignInKept();
+  // The saved renewal is used up; store the new one before anything else.
+  file.reset();
+  const auto renewal = session->export_renewal();
+  credential_detail::validate_renewal(config.api_origin(), renewal.view(), now());
+  atomic_write(directory, key, encrypt(renewal.view(), directory.scope(key)));
+  return session;
+}
+} // namespace
+std::optional<Session> CredentialStore::load(const PlatformConfig& config) {
+  return load_renewal(config, [&](std::string_view renewal) { return Session::resume(config, renewal); });
+}
+std::optional<Session> CredentialStore::load(const PlatformConfig& config, Transport& transport, std::function<std::int64_t()> clock) {
+  return load_renewal(config, [&](std::string_view renewal) { return Session::resume(config, renewal, transport, clock); });
 }
 void CredentialStore::erase(const PlatformConfig& config) {
   const auto key = storage_key(config);

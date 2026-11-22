@@ -10,7 +10,7 @@ Windows 上同时运行多个沙盒，每个沙盒是一个窗口里的完整 Li
 
 沙盒运行在 Windows 自带的 WSL2 中、本项目自己的 Debian 发行版里：每个沙盒一个容器、一个私有显示窗口（WSLg）和一个网关网络命名空间，网关经 TUIC 连到绑定节点，出口许可随节点租约续期、到期由内核自动断开。详见 [架构说明](docs/architecture.md)、[路线图](docs/roadmap.md) 与 [选型方案](docs/proposal-wsl-linux-desktop.md)。
 
-**2026-11-20 起改为 WSL2 Linux 桌面路线。** L1–L3（运行底座、沙盒桌面、全流量经节点）已在测试虚拟机配合真实节点验收；L4（产品功能）除“记住登录”外已完成；L5 的 Inno Setup 安装包已在测试虚拟机上完成安装、升级、卸载验收（见 [deploy/windows](deploy/windows/README.md)）。原生 Windows CEF/WFP 方案曾在测试机跑通，但无法让 UDP 经节点、也没有完整桌面，已于 2026-11-21 从主线删除（代码在 git 历史与 `p0-consolidation` 分支，记录在 `docs/archive/`）。
+**2026-11-20 起改为 WSL2 Linux 桌面路线。** L1–L3（运行底座、沙盒桌面、全流量经节点）已在测试虚拟机配合真实节点验收；L4（产品功能）已完成；L5 的 Inno Setup 安装包已在测试虚拟机上完成安装、升级、卸载验收（见 [deploy/windows](deploy/windows/README.md)）。原生 Windows CEF/WFP 方案曾在测试机跑通，但无法让 UDP 经节点、也没有完整桌面，已于 2026-11-21 从主线删除（代码在 git 历史与 `p0-consolidation` 分支，记录在 `docs/archive/`）。
 
 | 部分 | 当前实现 |
 |---|---|

@@ -36,7 +36,10 @@ namespace orangespace::sandbox {
 class Centre final : public platform_session::SharedCentre {
  public:
   // log: optional, one secret-free line per refresh event, from the refresher.
-  explicit Centre(platform_session::Session session, std::function<void(const std::string&)> log = {});
+  // refreshed: optional, called with the lock held right after each refresh
+  // (to save the new renewal when the sign-in is remembered).
+  explicit Centre(platform_session::Session session, std::function<void(const std::string&)> log = {},
+                  std::function<void(const platform_session::Session&)> refreshed = {});
   ~Centre() override;
   Centre(const Centre&) = delete;
   Centre& operator=(const Centre&) = delete;
@@ -52,6 +55,7 @@ class Centre final : public platform_session::SharedCentre {
   bool closing_{false};
   platform_session::Session session_;
   std::function<void(const std::string&)> log_;
+  std::function<void(const platform_session::Session&)> refreshed_;
   std::thread refresher_;
 };
 

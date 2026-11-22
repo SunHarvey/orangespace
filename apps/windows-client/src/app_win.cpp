@@ -6,6 +6,11 @@
 // --password-stdin (acceptance runs only) signs in with the password read from
 // a redirected standard input, so a test never types or shows it.
 //
+// 记住登录 (on by default) keeps the Centre session's renewal in the current
+// user's DPAPI store (platform_session::CredentialStore), replaced after every
+// refresh. The next start signs in from it; closing the window keeps it, 退出登录
+// revokes the session and erases it.
+//
 // The trust directory (default: "trust" next to this program) holds the
 // administrator-protected platform.json (Centre) and catalog.json (node pins);
 // both loaders refuse files a normal user could change. An optional probe.json
@@ -19,6 +24,7 @@
 #include "orangespace/files_window.hpp"
 #include "orangespace/json.hpp"
 #include "orangespace/node_session.hpp"
+#include "orangespace/platform_credential_store.hpp"
 #include "orangespace/platform_session.hpp"
 #include "orangespace/sandbox_engine.hpp"
 #include "orangespace/sandbox_status.hpp"
@@ -61,7 +67,7 @@ constexpr UINT kSetupProgress = WM_APP + 5;  // lparam: new std::wstring
 constexpr UINT kRemoved = WM_APP + 6;        // lparam: new std::wstring (empty: done)
 constexpr UINT_PTR kTick = 1;
 
-enum Id : int { Username = 100, Password, SignIn, List, Name, Node, Create, Open, Stop, Rebind, Delete, SignOut, Files, RemoveData };
+enum Id : int { Username = 100, Password, SignIn, List, Name, Node, Create, Open, Stop, Rebind, Delete, SignOut, Files, RemoveData, Remember };
 
 std::wstring widen(std::string_view s) {
   const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
@@ -158,6 +164,8 @@ struct SignInResult {
   std::unique_ptr<ps::Session> session;
   std::vector<ps::NodeRef> nodes;
   std::wstring error;
+  bool remembered{false};  // the session's renewal is saved and kept current
+  std::wstring warning;    // signed in, but remembering it failed
 };
 
 class App {
@@ -180,6 +188,8 @@ class App {
     password_ = control(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL | ES_PASSWORD, Password, WS_EX_CLIENTEDGE);
     SendMessageW(username_, EM_LIMITTEXT, 64, 0);
     SendMessageW(password_, EM_LIMITTEXT, 1024, 0);
+    remember_ = control(L"BUTTON", L"记住登录", WS_TABSTOP | BS_AUTOCHECKBOX, Remember);
+    SendMessageW(remember_, BM_SETCHECK, BST_CHECKED, 0);
     sign_in_ = control(L"BUTTON", L"登录", WS_TABSTOP | BS_DEFPUSHBUTTON, SignIn);
     remove_data_ = control(L"BUTTON", L"删除本机全部数据…", WS_TABSTOP, RemoveData);
 
@@ -217,6 +227,8 @@ class App {
     if (auto_password_) {
       SetWindowTextW(username_, widen(auto_user_).c_str());
       begin_sign_in(auto_user_, std::move(auto_password_));
+    } else {
+      begin_resume();
     }
   }
 
@@ -231,8 +243,9 @@ class App {
       MoveWindow(username_, x, y + px(80), px(360), row, TRUE);
       MoveWindow(password_label_, x, y + px(122), px(360), px(22), TRUE);
       MoveWindow(password_, x, y + px(146), px(360), row, TRUE);
-      MoveWindow(sign_in_, x, y + px(196), px(360), px(34), TRUE);
-      MoveWindow(notice_, x, y + px(244), px(360), px(60), TRUE);
+      MoveWindow(remember_, x, y + px(186), px(360), px(26), TRUE);
+      MoveWindow(sign_in_, x, y + px(222), px(360), px(34), TRUE);
+      MoveWindow(notice_, x, y + px(270), px(360), px(60), TRUE);
       MoveWindow(remove_data_, w - m - px(160), h - m - px(30), px(160), px(30), TRUE);
       return;
     }
@@ -355,15 +368,21 @@ class App {
     EnableWindow(sign_in_, TRUE);
     EnableWindow(username_, TRUE);
     EnableWindow(password_, TRUE);
+    EnableWindow(remember_, TRUE);
     if (!result->session) {
       notice(result->error);
       return;
     }
+    remembered_ = result->remembered;
     {
       const auto log_path = user_directory(result->session->identity().central_user_id) / L"client.log";
-      centre_ = std::make_shared<sb::Centre>(std::move(*result->session), [log_path](const std::string& line) {
-        std::ofstream(log_path, std::ios::app | std::ios::binary) << line << "\n";
-      });
+      std::function<void(const ps::Session&)> refreshed;
+      if (remembered_)
+        refreshed = [platform = platform_](const ps::Session& s) { ps::CredentialStore::save(*platform, s); };
+      centre_ = std::make_shared<sb::Centre>(
+          std::move(*result->session),
+          [log_path](const std::string& line) { std::ofstream(log_path, std::ios::app | std::ios::binary) << line << "\n"; },
+          std::move(refreshed));
     }
     nodes_ = std::move(result->nodes);
     const auto identity = centre_->identity();
@@ -384,7 +403,8 @@ class App {
     if (agent_) make_engine();
     show_main(true);
     fill_list();
-    if (nodes_.empty()) notice(L"中心没有给这个账号授权可用的节点，请联系管理员。");
+    if (!result->warning.empty()) notice(result->warning);
+    else if (nodes_.empty()) notice(L"中心没有给这个账号授权可用的节点，请联系管理员。");
     else if (!agent_error_.empty()) notice(agent_error_);
     else if (!agent_) notice(L"正在启动 WSL……");
     else notice(L"");
@@ -433,6 +453,7 @@ class App {
       return;
     }
     closing_ = false;
+    remembered_ = false;
     store_ = sb::Store{};
     nodes_.clear();
     ListView_DeleteAllItems(list_);
@@ -477,7 +498,7 @@ class App {
   }
 
   void show_main(bool main) {
-    for (HWND h : {heading_, username_label_, username_, password_label_, password_, sign_in_, remove_data_})
+    for (HWND h : {heading_, username_label_, username_, password_label_, password_, remember_, sign_in_, remove_data_})
       ShowWindow(h, main ? SW_HIDE : SW_SHOW);
     for (HWND h : {identity_, sign_out_, list_, open_, stop_, files_, delete_, name_label_, name_, node_label_, node_, create_, rebind_})
       ShowWindow(h, main ? SW_SHOW : SW_HIDE);
@@ -563,16 +584,24 @@ class App {
       notice(L"请输入账号和密码。");
       return;
     }
-    EnableWindow(sign_in_, FALSE);
-    EnableWindow(username_, FALSE);
-    EnableWindow(password_, FALSE);
-    notice(L"正在登录……");
-    sign_in_thread_ = std::thread([this, user, password] {
+    const bool remember = SendMessageW(remember_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    lock_sign_in(L"正在登录……");
+    sign_in_thread_ = std::thread([this, user, password, remember] {
       auto result = std::make_unique<SignInResult>();
       try {
         result->session = std::make_unique<ps::Session>(ps::Session::login(*platform_, user, *password));
         for (auto& n : result->session->nodes())
           if (std::find(n.scopes.begin(), n.scopes.end(), "tunnel") != n.scopes.end()) result->nodes.push_back(std::move(n));
+        // A password sign-in replaces whatever was remembered before.
+        try {
+          ps::CredentialStore::erase(*platform_);
+          if (remember) {
+            ps::CredentialStore::save(*platform_, *result->session);
+            result->remembered = true;
+          }
+        } catch (const std::exception&) {
+          result->warning = L"已登录，但没能记住登录，下次需要重新输入密码。";
+        }
       } catch (const ps::HttpStatusError& e) {
         result->session.reset();
         result->error = e.status_code() == 401 ? L"账号或密码不正确。" : L"中心拒绝了登录（HTTP " + std::to_wstring(e.status_code()) + L"）。";
@@ -581,6 +610,44 @@ class App {
         result->error = L"无法连接中心，请检查网络后重试。";
       }
       nd::wipe(password->data(), password->size());
+      PostMessageW(window_, kSignedIn, 0, reinterpret_cast<LPARAM>(result.release()));
+    });
+  }
+
+  void lock_sign_in(const wchar_t* text) {
+    EnableWindow(sign_in_, FALSE);
+    EnableWindow(username_, FALSE);
+    EnableWindow(password_, FALSE);
+    EnableWindow(remember_, FALSE);
+    notice(text);
+  }
+
+  // At start: sign in from the remembered renewal, if there is one.
+  void begin_resume() {
+    if (!platform_ || sign_in_thread_.joinable()) return;
+    lock_sign_in(L"正在用保存的登录信息登录……");
+    sign_in_thread_ = std::thread([this] {
+      auto result = std::make_unique<SignInResult>();
+      try {
+        auto saved = ps::CredentialStore::load(*platform_);
+        if (saved) {
+          result->session = std::make_unique<ps::Session>(std::move(*saved));
+          result->remembered = true;
+          for (auto& n : result->session->nodes())
+            if (std::find(n.scopes.begin(), n.scopes.end(), "tunnel") != n.scopes.end()) result->nodes.push_back(std::move(n));
+        }
+      } catch (const ps::SavedSignInKept&) {
+        result->session.reset();
+        result->error = L"无法连接中心，暂时不能用保存的登录信息。请检查网络后重新打开橙域，或输入密码登录。";
+      } catch (const ps::HttpStatusError& e) {
+        result->session.reset();
+        result->error = e.status_code() == 401 || e.status_code() == 403
+                            ? L"保存的登录已失效，请重新登录。"
+                            : L"中心暂时不可用（HTTP " + std::to_wstring(e.status_code()) + L"），请稍后重试或输入密码登录。";
+      } catch (const std::exception&) {
+        result->session.reset();
+        result->error = L"保存的登录信息无法使用，请重新登录。";
+      }
       PostMessageW(window_, kSignedIn, 0, reinterpret_cast<LPARAM>(result.release()));
     });
   }
@@ -597,14 +664,24 @@ class App {
     stop_everything();
   }
 
+  // Closing the window keeps a remembered sign-in (the session stays, unused,
+  // until its deadline); signing out, or closing without it, ends the session.
   void stop_everything() {
-    stop_thread_ = std::thread([this] {
+    const bool keep = exiting_ && remembered_, forget = remembered_ && !exiting_;
+    stop_thread_ = std::thread([this, keep, forget] {
       if (engine_) engine_->shutdown();
-      if (centre_) {
+      if (centre_ && !keep) {
         try {
           centre_->logout();
         } catch (const std::exception&) {
           // The Centre session expires on its own; no sandbox is running any more.
+        }
+      }
+      if (forget && platform_) {
+        try {
+          ps::CredentialStore::erase(*platform_);
+        } catch (const std::exception&) {
+          // The pending marker stays; the next password sign-in finishes the erase.
         }
       }
       PostMessageW(window_, kStopped, 0, 0);
@@ -813,7 +890,7 @@ class App {
   HWND window_{};
   UINT dpi_{96};
   HFONT font_{}, title_font_{};
-  HWND heading_{}, username_label_{}, username_{}, password_label_{}, password_{}, sign_in_{}, remove_data_{};
+  HWND heading_{}, username_label_{}, username_{}, password_label_{}, password_{}, remember_{}, sign_in_{}, remove_data_{};
   HWND identity_{}, sign_out_{}, list_{}, open_{}, stop_{}, files_{}, delete_{}, name_label_{}, name_{}, node_label_{}, node_{},
       create_{}, rebind_{}, notice_{};
   std::wstring notice_text_, agent_error_, setup_text_;
@@ -831,7 +908,7 @@ class App {
   sb::Store store_;
   fs::path directory_;
   std::thread agent_thread_, sign_in_thread_, stop_thread_;
-  bool closing_{false}, exiting_{false};
+  bool closing_{false}, exiting_{false}, remembered_{false};
 };
 
 App* app = nullptr;
