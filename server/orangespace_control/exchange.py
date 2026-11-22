@@ -39,7 +39,13 @@ def install_routes(app,engine,body,auth,identity):
             epochs=live(conn,user,session,node,mapping,grant)
             if expected!=epochs: raise ControlError(409,'conflict')
             token=secrets.token_urlsafe(32)
-            federation_expiry=min(session['expires_at'],grant['valid_until'] if grant['valid_until'] is not None else session['expires_at'])
+            # A renewable session's federation lives to the session's hard deadline:
+            # consume, validate and every permit still require the session itself
+            # to be live (refreshed, unrevoked), so this never outlasts it.
+            from .refresh_schema import refresh_tokens
+            limit=conn.execute(select(refresh_tokens.c.deadline).where(refresh_tokens.c.session_id==session['id']).limit(1)).scalar()
+            if limit is None: limit=session['expires_at']
+            federation_expiry=min(limit,grant['valid_until'] if grant['valid_until'] is not None else limit)
             expiry=min(now()+30,federation_expiry)
             ticket=dict(federation_expires_at=federation_expiry,id=uid(),token_digest=digest(b'node-exchange',token),central_session_id=session['id'],central_user_id=user['id'],node_id=nid,mapping_id=mapping['id'],grant_id=grant['id'],legacy_user_id=mapping['legacy_user_id'],expires_at=expiry,**epochs,**{k:node[k] for k in ('public_key','key_fingerprint','machine_token_digest','config_revision')})
             conn.execute(exchanges.insert().values(**ticket))

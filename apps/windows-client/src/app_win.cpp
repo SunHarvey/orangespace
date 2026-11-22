@@ -359,7 +359,12 @@ class App {
       notice(result->error);
       return;
     }
-    centre_ = std::make_unique<sb::Centre>(std::move(*result->session));
+    {
+      const auto log_path = user_directory(result->session->identity().central_user_id) / L"client.log";
+      centre_ = std::make_shared<sb::Centre>(std::move(*result->session), [log_path](const std::string& line) {
+        std::ofstream(log_path, std::ios::app | std::ios::binary) << line << "\n";
+      });
+    }
     nodes_ = std::move(result->nodes);
     const auto identity = centre_->identity();
     directory_ = user_directory(identity.central_user_id);
@@ -761,9 +766,8 @@ class App {
     target.context.central_user_id = centre_->identity().central_user_id;
     target.context.sandbox_id = r->id;
     target.context.node_id = r->node_id;
-    target.context.platform = platform_;
+    target.context.centre = centre_;
     target.context.catalog = catalog_;
-    target.context.central_envelope = std::make_shared<const ps::SerializedSecret>(centre_->envelope());
     target.staging = directory_ / L"transfer";
     files_windows_->open(target);
   }
@@ -819,7 +823,7 @@ class App {
   std::shared_ptr<const ns::TrustedCatalog> catalog_;
   std::string probe_;
   std::unique_ptr<wsl::Agent> agent_;
-  std::unique_ptr<sb::Centre> centre_;
+  std::shared_ptr<sb::Centre> centre_;
   std::unique_ptr<sb::Engine> engine_;
   std::unique_ptr<sb::GuestFiles> guest_files_;
   std::unique_ptr<sb::FilesWindows> files_windows_;

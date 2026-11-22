@@ -33,7 +33,9 @@ struct Bootstrap {
 };
 struct CentralIdentity {
   std::string central_user_id, central_session_id, username, role;
-  std::int64_t user_epoch{}, expires_at{};
+  // expires_at: the access credential (renewed by refresh). deadline: the hard
+  // end of the session, which node federations may last until.
+  std::int64_t user_epoch{}, expires_at{}, deadline{};
 };
 struct NodeRef {
   std::string node_id, alias, display_name, api_origin, tls_server_name, key_fingerprint;
@@ -72,6 +74,15 @@ class Transport {
   virtual Response request(const Bootstrap&, std::string_view method, std::string_view path,
       std::string_view body, std::string_view bearer) = 0;
 };
+// Thread-safe access to one signed-in Centre session for its holders (sandbox
+// workers, file transfers). Holders never log it out.
+class SharedCentre {
+ public:
+  virtual ~SharedCentre() = default;
+  virtual CentralIdentity identity() const = 0;
+  virtual std::vector<NodeRef> nodes() = 0;
+  virtual ExchangeTicket issue(std::string_view node_id) = 0;  // revalidates first
+};
 class Session {
  public:
   static Session login(const PlatformConfig&, std::string_view username, std::string_view password);
@@ -86,6 +97,14 @@ class Session {
   Session& operator=(Session&&) = delete;
   const CentralIdentity& identity() const noexcept { return identity_; }
   void revalidate();
+  // Signed-in sessions are renewable: refresh() rotates the access and refresh
+  // credentials and extends expires_at (never past deadline). Due from
+  // renew_at() on. A transport failure keeps the current credentials, so the
+  // same refresh may be retried (the Centre accepts a lost-response retry for
+  // a few minutes); HTTP 401 means the session has ended.
+  bool renewable() const noexcept { return !refresh_.view().empty(); }
+  std::int64_t renew_at() const noexcept { return renew_at_; }
+  void refresh();
   // Serialization only: no central DPAPI persistence is implemented here.
   // Parent must use a separate central namespace/entropy/file, never old blobs.
   SerializedSecret export_envelope() const;
@@ -94,11 +113,14 @@ class Session {
   void logout(); // Remote 202 = revocation accepted, not forwarding stopped.
  private:
   Session(Bootstrap, CentralIdentity, SerializedSecret, Transport&, std::function<std::int64_t()>);
+  void schedule();
   Response request(std::string_view method, std::string_view path, std::string_view body, unsigned expected);
   void live() const;
   Bootstrap bootstrap_;
   CentralIdentity identity_;
   SerializedSecret token_;
+  SerializedSecret refresh_;
+  std::int64_t renew_at_{};
   Transport* transport_;
   std::function<std::int64_t()> clock_;
 };

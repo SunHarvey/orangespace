@@ -88,6 +88,38 @@ std::string text_or_empty(const json::Value& v, std::string_view key) {
 }
 }  // namespace
 
+Centre::Centre(ps::Session session, std::function<void(const std::string&)> log)
+    : session_(std::move(session)), log_(std::move(log)) {
+  refresher_ = std::thread([this] { keep_fresh(); });
+}
+
+Centre::~Centre() {
+  {
+    std::lock_guard lock(mutex_);
+    closing_ = true;
+  }
+  wake_.notify_all();
+  if (refresher_.joinable()) refresher_.join();
+}
+
+void Centre::keep_fresh() noexcept {
+  // Retries stay well inside the Centre's lost-response window.
+  constexpr auto kRetry = std::chrono::seconds(20);
+  std::unique_lock lock(mutex_);
+  while (!closing_ && session_.renewable()) {
+    const auto wait = std::chrono::seconds((std::max<std::int64_t>)(0, session_.renew_at() - unix_seconds()));
+    if (wake_.wait_for(lock, wait, [&] { return closing_; })) break;
+    try {
+      session_.refresh();
+      if (log_) log_("Centre session refreshed");
+    } catch (const std::exception& e) {
+      if (log_) log_("Centre session refresh failed: " + reason(e));
+      if (!session_.renewable()) break;  // the Centre refused: the session has ended
+      if (wake_.wait_for(lock, kRetry, [&] { return closing_; })) break;
+    }
+  }
+}
+
 ps::CentralIdentity Centre::identity() const {
   std::lock_guard lock(mutex_);
   return session_.identity();
@@ -104,13 +136,10 @@ ps::ExchangeTicket Centre::issue(std::string_view node_id) {
   return session_.issue(node_id);
 }
 
-ps::SerializedSecret Centre::envelope() const {
-  std::lock_guard lock(mutex_);
-  return session_.export_envelope();
-}
-
 void Centre::logout() {
   std::lock_guard lock(mutex_);
+  closing_ = true;
+  wake_.notify_all();
   session_.logout();
 }
 

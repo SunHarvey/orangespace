@@ -48,7 +48,8 @@ MySQL8.4/InnoDB是唯一正式服务端数据库；SQLAlchemy，版本化Alembic
 - Revocation `{schema:1,revocation_id,committed_at,enforcement_deadline,cleanup_state:"pending"|"complete"}`。commit+30秒是保守最大上界；complete只能来自实际清理读回，不能仅因DB已改状态。
 
 用户接口：
-- POST `/auth/login` `{schema:1,username,password}` -> `{schema:1,access_token,token_type:"bearer",central_session_id,expires_at,user:User,nodes:[NodeRef],nodes_next_cursor}`。session上限3600秒；一期不做refresh，需重新登录。
+- POST `/auth/login` `{schema:1,username,password[,renewable:true]}` -> `{schema:1,access_token,token_type:"bearer",central_session_id,expires_at,user:User,nodes:[NodeRef],nodes_next_cursor}`。访问凭据上限3600秒（`session_ttl_seconds`）。带 `renewable:true` 时另返回 `session_deadline`（会话硬截止，登录起 `session_max_seconds`，默认30天）、`refresh_token`、`refresh_expires_at`（上次使用起 `refresh_ttl_seconds`，默认14天，不超过硬截止）；不带时与旧版完全相同、不能续期。
+- POST `/auth/refresh` `{schema:1,refresh_token}`（不带 Bearer）-> `{schema:1,access_token,token_type:"bearer",central_session_id,expires_at,session_deadline,user:User,refresh_token,refresh_expires_at}`。同一会话：访问凭据与刷新凭据同时换新，旧访问凭据立即失效，`expires_at`=min(现在+`session_ttl_seconds`, 硬截止)，硬截止不变。每个刷新凭据只能用一次；用过的凭据在60秒内再次出现（响应丢失后重试）时作废尚未用过的后继并重新签发，否则视为被复制：撤销整个会话并记审计 `session.refresh_reuse`。账号停用、epoch 变化、会话撤销（含退出登录、改密码）、刷新凭据过期或到达硬截止一律 401。访问凭据已过期但会话未撤销、未到硬截止时可以刷新。数据库只存刷新凭据的域分离摘要（`control_refresh_tokens`，迁移 `control_0008`）。
 - GET `/session` -> `{schema:1,central_session_id,expires_at,user:User}`，权威校验账号/session/epoch。
 - GET `/me/nodes` -> NodeRef列表，仅active节点、有效grant、approved映射的交集。
 - POST `/node-exchanges` `{schema:1,node_id,expected_epochs:Epochs}` ->201 `{schema:1,exchange_id,exchange_token,node_id,expires_at}`，一次性、最多30秒、精确绑定节点/session/映射/grant。
@@ -97,7 +98,7 @@ Service申请exchange，发送给可信节点 POST `/federation/v1/sessions/exch
 
 节点 `/federation/v1/sessions/exchange` 只交付一次独立随机节点用户凭据，数据库仅存摘要及绑定sidecar；已交付exchange的重复请求返回409，不重发/重造秘密。内部中心consume仍按原request幂等。调用者在投递前保留精确node/exchange_id/exchange_token清理责任；节点 POST `/federation/v1/sessions/exchange-cleanup` 接受 `{schema:1,exchange_id,exchange_token}`，以本机存储的域分离摘要校验，只能撤销该exchange创建的本地session，回复 `{schema:1,local_session_state:"revoked"}`；这不是中心失权或helper实际停止的证明。失败/未知资源不得假报完成。
 
-期限分层：exchange 的最多30秒仅是一次性消费窗口，不是中心身份会话时长。签发 ticket 时同时冻结联邦身份截止，取原中心 session 截止与当时 grant 截止的较早者；无 grant 截止时仍不超过原中心 session（上限3600秒）。首次消费及相同 request 重试均使用该原始身份截止，不因消费、读回、授权展期或重新校验延长。失权立即使在线核验失败。此处不放宽 helper/TUIC 租约：每次 create/renew 仍受原始 HTTP 单调锚点和最多30000ms约束，不能把身份会话截止当作转发授权截止。
+期限分层：exchange 的最多30秒仅是一次性消费窗口，不是中心身份会话时长。签发 ticket 时同时冻结联邦身份截止，取原中心 session 截止与当时 grant 截止的较早者；可续期会话的 session 截止取其硬截止 `session_deadline`，否则取访问凭据的 `expires_at`（上限3600秒）。联邦身份比当前访问凭据长并不放宽权限：consume、validate 与每次 permit 都在线核验中心会话本身未撤销、未过期（访问凭据需被及时刷新）、epoch 一致，客户端停止刷新后节点身份随中心会话一起失效。首次消费及相同 request 重试均使用该原始身份截止，不因消费、读回、授权展期或重新校验延长。失权立即使在线核验失败。此处不放宽 helper/TUIC 租约：每次 create/renew 仍受原始 HTTP 单调锚点和最多30000ms约束，不能把身份会话截止当作转发授权截止。
 
 节点每次创建/续租以机器Bearer POST `/control/v1/internal/lease-permits` `{schema:1,request_id,federation_session_id,tunnel_id,sandbox_id,generation,operation:"create"|"renew",expected_epochs:Epochs}` -> `{schema:1,permit_id,request_id,epochs:Epochs,expires_at,remaining_ttl_ms}`。中心在固定锁序的同事务内与revoke串行化；重试原request_id只能取原结果、剩余时间只减。节点在该HTTP开始前取单调锚点，permit D=min原锚点+remaining TTL、节点旧预算、中心session/grant有效余量、30000ms。中心故障拒绝新授权和续租，不用缓存positive/fallback；不能按响应接收或helper启动重新起30秒。
 

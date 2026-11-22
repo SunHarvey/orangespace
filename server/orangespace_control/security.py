@@ -52,6 +52,10 @@ def token_digest(token):
     return hashlib.sha256(b'OrangeSpace-control-user-v1\x00' + token.encode('ascii')).digest()
 
 
+def refresh_digest(token):
+    return hashlib.sha256(b'OrangeSpace-control-refresh-v1\x00' + token.encode('ascii')).digest()
+
+
 def verify(password, encoded):
     try:
         return PASSWORDS.verify(encoded, password)

@@ -1,4 +1,6 @@
 {
   "database_url": "mysql+pymysql://REPLACE_USER:REPLACE_URL_ENCODED_PASSWORD@mysql.example.invalid:3306/orangespace_control?charset=utf8mb4&ssl_ca=/etc/orangespace/ca/rds-ca.pem",
-  "session_ttl_seconds": 3600
+  "session_ttl_seconds": 3600,
+  "refresh_ttl_seconds": 1209600,
+  "session_max_seconds": 2592000
 }

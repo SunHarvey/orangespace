@@ -7,16 +7,25 @@ struct TestAccess { static PlatformConfig config() { return PlatformConfig(valid
 }
 const std::string uid="11111111-1111-4111-8111-111111111111", sid="22222222-2222-4222-8222-222222222222", nid="33333333-3333-4333-8333-333333333333", legacy="44444444-4444-4444-8444-444444444444";
 std::string user() { return "{\"central_user_id\":\""+uid+"\",\"username\":\"alice\",\"role\":\"user\",\"enabled\":true,\"user_epoch\":3,\"created_at\":1}"; }
-std::string metadata() { return "\"schema\":1,\"central_session_id\":\""+sid+"\",\"expires_at\":5000,\"user\":"+user(); }
+std::string metadata(int expiry=5000) { return "\"schema\":1,\"central_session_id\":\""+sid+"\",\"expires_at\":"+std::to_string(expiry)+",\"user\":"+user(); }
 std::string node(std::string id) { return "{\"node_id\":\""+id+"\",\"alias\":\"node.a\",\"display_name\":\"Node A\",\"api_origin\":\"https://node.example.test\",\"tls_server_name\":\"node.example.test\",\"node_epoch\":2,\"config_revision\":4,\"key_fingerprint\":\""+std::string(64,'a')+"\",\"grant_id\":\""+uid+"\",\"grant_epoch\":5,\"scopes\":[\"files.read\",\"tunnel\"],\"mapping_id\":\""+sid+"\",\"mapping_epoch\":6,\"legacy_user_id\":\""+legacy+"\"}"; }
 struct Fake final : Transport {
-  int pages=0, deletes=0; bool repeat=false, change=false, large=false, bad_logout=false; unsigned status=200;
+  int pages=0, deletes=0, refreshes=0; bool repeat=false, change=false, large=false, bad_logout=false, offline=false, past_deadline=false; unsigned status=200, refresh_status=200;
+  // The Centre rotates both credentials on each refresh: access 'A'+n, refresh 'R'+n.
+  char access='A', renewal='R'; int expiry=5000;
   Response request(const Bootstrap& b, std::string_view method, std::string_view path, std::string_view body, std::string_view bearer) override {
     assert(b.api_origin=="https://centre.example.test");
+    if(path=="/control/v1/auth/refresh") {
+      assert(method=="POST" && bearer.empty() && body.find("\"refresh_token\":\""+std::string(43,renewal)+"\"")!=body.npos);
+      if(offline) throw std::runtime_error("connection reset");
+      if(refresh_status!=200) return {refresh_status,SerializedSecret("{}")};
+      ++refreshes; ++access; ++renewal; expiry+=1800;
+      return {200,SerializedSecret("{"+metadata(expiry)+",\"access_token\":\""+std::string(43,access)+"\",\"token_type\":\"bearer\",\"session_deadline\":"+(past_deadline?"90001":"90000")+",\"refresh_token\":\""+std::string(43,renewal)+"\",\"refresh_expires_at\":80000}")};
+    }
     if(status!=200) return {status,SerializedSecret("secret backend failure")};
-    if(path=="/control/v1/auth/login") { assert(body.find("\"schema\":1")!=body.npos); return {200,SerializedSecret("{"+metadata()+",\"access_token\":\""+std::string(43,'A')+"\",\"token_type\":\"bearer\",\"nodes\":[],\"nodes_next_cursor\":null}")}; }
-    assert(bearer==std::string(43,'A'));
-    if(path=="/control/v1/session") { auto data="{"+metadata()+"}"; if(change) data.replace(data.find(uid),uid.size(),legacy); return {200,SerializedSecret(data)}; }
+    if(path=="/control/v1/auth/login") { assert(body.find("\"schema\":1")!=body.npos && body.find("\"renewable\":true")!=body.npos); return {200,SerializedSecret("{"+metadata(expiry)+",\"access_token\":\""+std::string(43,access)+"\",\"token_type\":\"bearer\",\"nodes\":[],\"nodes_next_cursor\":null,\"session_deadline\":90000,\"refresh_token\":\""+std::string(43,renewal)+"\",\"refresh_expires_at\":60000}")}; }
+    assert(bearer==std::string(43,access));
+    if(path=="/control/v1/session") { auto data="{"+metadata(expiry)+"}"; if(change) data.replace(data.find(uid),uid.size(),legacy); return {200,SerializedSecret(data)}; }
     if(large && path.starts_with("/control/v1/me/nodes")) {
       std::string items;
       for(unsigned i=1;i<=100;++i) {auto id=nid; char suffix[9];std::snprintf(suffix,sizeof(suffix),"%08x",i);id.replace(0,8,suffix);if(!items.empty()) items+=',';items+=node(id);}
@@ -60,6 +69,27 @@ void session_flow() {
   fake.status=401; denied=false; try {s.revalidate();} catch(const HttpStatusError& e) {denied=e.status_code()==401 && std::string(e.what())=="platform HTTPS response rejected";} assert(denied); fake.status=200;
   fake.bad_logout=true;denied=false;try{s.logout();}catch(const std::runtime_error&){denied=true;}assert(denied);fake.bad_logout=false;
   s.logout(); assert(fake.deletes==2); denied=false; try {(void)s.export_envelope();} catch(const std::runtime_error&) {denied=true;} assert(denied);
+  assert(!s.renewable());
+}
+void refresh_flow() {
+  auto config=detail::TestAccess::config(); Fake fake; std::int64_t now=1000; auto clock=[&now] {return now;};
+  auto s=Session::login(config,"alice","password-for-test",fake,clock);
+  assert(s.renewable() && s.identity().expires_at==5000 && s.identity().deadline==90000 && s.renew_at()==3000);
+  // A restored copy is not renewable and its deadline is its own expiry.
+  auto copy=Session::restore(config,s.export_envelope().view(),fake,clock);
+  assert(!copy.renewable() && copy.identity().deadline==5000);
+  now=3000; s.refresh();
+  assert(fake.refreshes==1 && s.identity().expires_at==6800 && s.renew_at()==4900);
+  s.revalidate();  // the rotated access credential is in use
+  // A lost response keeps the credentials, so the same refresh can be retried.
+  fake.offline=true; bool failed=false; try{s.refresh();}catch(const std::runtime_error&){failed=true;} assert(failed && s.renewable());
+  fake.offline=false; s.refresh(); assert(fake.refreshes==2 && s.identity().expires_at==8600);
+  // The Centre never moves the hard deadline.
+  fake.past_deadline=true; failed=false; try{s.refresh();}catch(const std::runtime_error&){failed=true;} assert(failed); fake.past_deadline=false;
+  --fake.access; --fake.renewal; fake.expiry-=1800;  // that rotation was refused here
+  fake.refresh_status=503; failed=false; try{s.refresh();}catch(const HttpStatusError& e){failed=e.status_code()==503;} assert(failed && s.renewable());
+  // 401: the session has ended (revoked, or the refresh credential was reused).
+  fake.refresh_status=401; failed=false; try{s.refresh();}catch(const HttpStatusError& e){failed=e.status_code()==401;} assert(failed && !s.renewable());
 }
 int main() {
   try {
@@ -69,6 +99,7 @@ int main() {
       bool denied=false; try { (void)detail::validate_bootstrap(input); } catch (const std::runtime_error&) { denied=true; } assert(denied);
     }
     session_flow();
+    refresh_flow();
     std::cout << "platform bootstrap/session/pagination/identity tests passed\n";
   } catch (const std::exception&) { std::cerr << "platform bootstrap test failed\n"; return 1; }
 }

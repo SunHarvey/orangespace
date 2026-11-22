@@ -29,21 +29,30 @@
 namespace orangespace::sandbox {
 
 // The signed-in Centre session. platform_session::Session is single-threaded;
-// every call goes through this lock.
-class Centre {
+// every call goes through this lock. A background thread refreshes the
+// session while it is renewable, so its credentials rotate in place and the
+// holders keep working past the access lifetime; it stops at logout, at
+// destruction, or once the Centre refuses the refresh (session ended).
+class Centre final : public platform_session::SharedCentre {
  public:
-  explicit Centre(platform_session::Session session) : session_(std::move(session)) {}
-  platform_session::CentralIdentity identity() const;
-  std::vector<platform_session::NodeRef> nodes();
-  platform_session::ExchangeTicket issue(std::string_view node_id);  // revalidates first
-  // The session in exportable form, for work that restores its own copy (node
-  // file transfers). Holders must never log it out.
-  platform_session::SerializedSecret envelope() const;
+  // log: optional, one secret-free line per refresh event, from the refresher.
+  explicit Centre(platform_session::Session session, std::function<void(const std::string&)> log = {});
+  ~Centre() override;
+  Centre(const Centre&) = delete;
+  Centre& operator=(const Centre&) = delete;
+  platform_session::CentralIdentity identity() const override;
+  std::vector<platform_session::NodeRef> nodes() override;
+  platform_session::ExchangeTicket issue(std::string_view node_id) override;
   void logout();
 
  private:
+  void keep_fresh() noexcept;
   mutable std::mutex mutex_;
+  std::condition_variable wake_;
+  bool closing_{false};
   platform_session::Session session_;
+  std::function<void(const std::string&)> log_;
+  std::thread refresher_;
 };
 
 struct Spec {

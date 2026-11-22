@@ -141,11 +141,17 @@ std::string json_of(const json::Value& v) {
 int run(const json::Value& config, bool password_stdin, int seconds) {
   const auto platform = ps::PlatformConfig::load(widen(text_field(config, "platform")));
   const auto catalog = ns::TrustedCatalog::load(widen(text_field(config, "catalog")));
+  std::mutex out;
+  const auto print = [&out](const std::string& line) {
+    std::lock_guard lock(out);
+    std::printf("%s\n", line.c_str());
+    std::fflush(stdout);
+  };
   std::unique_ptr<sb::Centre> centre;
   {
     Secret password;
     read_password(password, password_stdin);
-    centre = std::make_unique<sb::Centre>(ps::Session::login(platform, text_field(config, "username"), password.value));
+    centre = std::make_unique<sb::Centre>(ps::Session::login(platform, text_field(config, "username"), password.value), print);
   }
   std::string probe;
   if (const auto* p = config.find("probe")) probe = json_of(*p);
@@ -165,12 +171,7 @@ int run(const json::Value& config, bool password_stdin, int seconds) {
   std::fflush(stdout);
 
   wsl::Agent agent;
-  std::mutex out;
-  sb::Engine engine(catalog, *centre, agent, probe, [&](const std::string& line) {
-    std::lock_guard lock(out);
-    std::printf("%s\n", line.c_str());
-    std::fflush(stdout);
-  });
+  sb::Engine engine(catalog, *centre, agent, probe, print);
   for (const auto& s : specs) engine.open(s);
   const auto until = seconds > 0 ? nd::monotonic_ms() + seconds * 1000LL : INT64_MAX;
   while (!stopping && nd::monotonic_ms() < until && agent.running()) Sleep(250);

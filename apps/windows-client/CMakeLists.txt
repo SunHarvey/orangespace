@@ -125,6 +125,12 @@ if(WIN32)
         target_link_libraries(orangespace-${test_name}-tests PRIVATE orangespace_node_session)
       endif()
     endforeach()
+    add_executable(orangespace-platform-session-tests tests/platform_session_tests.cpp)
+    target_link_libraries(orangespace-platform-session-tests PRIVATE orangespace_node_session)
+    if(MSVC)
+      target_compile_options(orangespace-platform-session-tests PRIVATE /UNDEBUG /utf-8)
+    endif()
+    add_test(NAME platform-session COMMAND orangespace-platform-session-tests)
     # Explicit headless fixture; native execution is opt-in, never on startup.
     add_executable(orangespace-file-directory-native-tests WIN32
       tests/file_transfer_directory_native_win.cpp src/file_transfer_win.cpp)

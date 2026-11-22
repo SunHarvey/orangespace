@@ -15,7 +15,7 @@ from .security import PASSWORDS, authority_lock, record_audit, uid, now, usernam
 
 def check_migration(engine):
     with engine.connect() as conn:
-        if conn.execute(text('SELECT version_num FROM control_alembic_version')).scalar_one() != 'control_0007':
+        if conn.execute(text('SELECT version_num FROM control_alembic_version')).scalar_one() != 'control_0008':
             raise RuntimeError('control migration required')
 
 

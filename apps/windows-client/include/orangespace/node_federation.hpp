@@ -57,7 +57,8 @@ inline void same_node(const NodeRef& a, const NodeRef& b) {
 }
 
 // The node's exchange reply names this Centre session, this node binding and
-// its epochs, and expires no later than the Centre session. Returns the expiry.
+// its epochs, and expires no later than the Centre session's deadline. Returns
+// the expiry.
 inline std::int64_t validate_exchange(const json::Value& root, const platform_session::CentralIdentity& c,
                                       const NodeRef& n, std::int64_t now) {
   nd::object(root, 3);
@@ -78,7 +79,7 @@ inline std::int64_t validate_exchange(const json::Value& root, const platform_se
               nd::integer(nd::field(e, "mapping_epoch")) == n.mapping_epoch &&
               nd::integer(nd::field(e, "grant_epoch")) == n.grant_epoch);
   const auto expiry = nd::integer(nd::field(f, "expires_at"));
-  nd::require(expiry > now && expiry <= c.expires_at);
+  nd::require(expiry > now && expiry <= c.deadline);
   const auto& credential = nd::field(root, "node_credential");
   nd::object(credential, 5);
   nd::require(nd::integer(nd::field(credential, "schema")) == 1 &&

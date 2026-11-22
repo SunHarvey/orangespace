@@ -8,9 +8,14 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from .config import unique_object
 from .schema_v1 import users, sessions
-from .security import (ControlError, PASSWORDS, DUMMY_HASH, verify, now, uid, show,
-                       canonical, username, user_dto, token_digest, authenticate,
+from .refresh_schema import refresh_tokens
+from .security import (ControlError, PASSWORDS, DUMMY_HASH, TOKEN, verify, now, uid, show,
+                       canonical, username, user_dto, token_digest, refresh_digest, authenticate,
                        authority_lock, throttle, eligible_nodes, record_audit)
+
+# A refresh credential that was just used may be presented once more within this
+# window (the response was lost); the undelivered successor is then retired.
+REFRESH_GRACE_SECONDS = 60
 from .cli import check_migration
 
 
@@ -46,7 +51,7 @@ def create_app(config, engine=None):
     async def not_found(request, exc):
         return error(request, exc.status_code, 'not_found')
 
-    async def body(request, fields):
+    async def body(request, fields, optional=()):
         raw = bytearray()
         async for chunk in request.stream():
             raw.extend(chunk)
@@ -54,7 +59,7 @@ def create_app(config, engine=None):
                 raise ControlError(422, 'invalid_input')
         try:
             value = json.loads(raw, object_pairs_hook=unique_object, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
-            if not isinstance(value, dict) or set(value) != {'schema', *fields}:
+            if not isinstance(value, dict) or not {'schema', *fields} <= set(value) <= {'schema', *fields, *optional}:
                 raise ValueError()
             if type(value['schema']) is not int:
                 raise ValueError()
@@ -83,8 +88,11 @@ def create_app(config, engine=None):
 
     @app.post('/control/v1/auth/login')
     async def login(request: Request):
-        data = await body(request, {'username', 'password'})
+        data = await body(request, {'username', 'password'}, ('renewable',))
         name, password = credentials(data)
+        renewable = data.get('renewable', False)
+        if type(renewable) is not bool:
+            raise ControlError(422, 'invalid_input')
         throttle(engine, name, request.client.host if request.client else 'unknown')
         with engine.begin() as conn:
             authority_lock(conn)
@@ -92,10 +100,72 @@ def create_app(config, engine=None):
             valid = verify(password, user['password_hash'] if user else DUMMY_HASH)
             if not user or not valid or not user['enabled']:
                 raise ControlError(401, 'unauthenticated')
-            token, sid, expiry = secrets.token_urlsafe(32), uid(), now() + config.session_ttl_seconds
+            stamp = now()
+            token, sid, expiry = secrets.token_urlsafe(32), uid(), stamp + config.session_ttl_seconds
+            deadline = stamp + config.session_max_seconds
             conn.execute(sessions.insert().values(id=sid, user_id=user['id'], token_digest=token_digest(token), user_epoch=user['user_epoch'], expires_at=expiry))
             nodes, cursor = eligible_nodes(conn, user['id'])
-            return {'schema': 1, 'access_token': token, 'token_type': 'bearer', 'central_session_id': show(sid), 'expires_at': expiry, 'user': user_dto(user), 'nodes': nodes, 'nodes_next_cursor': cursor}
+            result = {'schema': 1, 'access_token': token, 'token_type': 'bearer', 'central_session_id': show(sid), 'expires_at': expiry, 'user': user_dto(user), 'nodes': nodes, 'nodes_next_cursor': cursor}
+            if renewable:
+                issued = issue_refresh(conn, sid, deadline, stamp)
+                issued.pop('_id')
+                result.update(session_deadline=deadline, **issued)
+            return result
+
+    def issue_refresh(conn, sid, deadline, stamp):
+        token, expiry = secrets.token_urlsafe(32), min(stamp + config.refresh_ttl_seconds, deadline)
+        rid = uid()
+        conn.execute(refresh_tokens.insert().values(id=rid, session_id=sid, token_digest=refresh_digest(token), deadline=deadline, created_at=stamp, expires_at=expiry))
+        return {'refresh_token': token, 'refresh_expires_at': expiry, '_id': rid}
+
+    @app.post('/control/v1/auth/refresh')
+    async def refresh(request: Request):
+        """Rotate the access and refresh credentials of a renewable session.
+
+        Each refresh credential works once. Presenting a used one again (outside
+        the short lost-response grace) means it was copied: the session is
+        revoked for everyone holding it.
+        """
+        data = await body(request, {'refresh_token'})
+        presented = data['refresh_token']
+        if not isinstance(presented, str) or not TOKEN.fullmatch(presented):
+            raise ControlError(422, 'invalid_input')
+        reused = False
+        with engine.begin() as conn:
+            authority_lock(conn)
+            stamp = now()
+            current = conn.execute(select(refresh_tokens).where(refresh_tokens.c.token_digest == refresh_digest(presented)).with_for_update()).mappings().first()
+            if not current:
+                raise ControlError(401, 'unauthenticated')
+            session = conn.execute(select(sessions).where(sessions.c.id == current['session_id']).with_for_update()).mappings().one()
+            user = conn.execute(select(users).where(users.c.id == session['user_id']).with_for_update()).mappings().one()
+            if (not user['enabled'] or session['revoked_at'] is not None or session['user_epoch'] != user['user_epoch']
+                    or current['expires_at'] <= stamp or current['deadline'] <= stamp):
+                raise ControlError(401, 'unauthenticated')
+            if current['used_at'] is not None:
+                successor = None
+                if current['replaced_by'] is not None:
+                    successor = conn.execute(select(refresh_tokens).where(refresh_tokens.c.id == current['replaced_by']).with_for_update()).mappings().first()
+                if stamp - current['used_at'] <= REFRESH_GRACE_SECONDS and successor is not None and successor['used_at'] is None:
+                    # Lost response: the successor was never used, so retire it.
+                    conn.execute(refresh_tokens.update().where(refresh_tokens.c.id == successor['id']).values(used_at=stamp))
+                else:
+                    revoke(conn, user['id'], session['id'])
+                    record_audit(conn, None, 'session.refresh_reuse', session['id'], session['user_epoch'], session['user_epoch'],
+                                 'refresh credential presented again', request.state.request_id)
+                    reused = True
+            if not reused:
+                access, expiry = secrets.token_urlsafe(32), min(stamp + config.session_ttl_seconds, current['deadline'])
+                conn.execute(sessions.update().where(sessions.c.id == session['id']).values(token_digest=token_digest(access), expires_at=expiry))
+                issued = issue_refresh(conn, session['id'], current['deadline'], stamp)
+                conn.execute(refresh_tokens.update().where(refresh_tokens.c.id == current['id']).values(
+                    used_at=current['used_at'] if current['used_at'] is not None else stamp, replaced_by=issued.pop('_id')))
+                conn.execute(refresh_tokens.delete().where(refresh_tokens.c.session_id == session['id'], refresh_tokens.c.expires_at <= stamp))
+                result = {'schema': 1, 'access_token': access, 'token_type': 'bearer', 'central_session_id': show(session['id']),
+                          'expires_at': expiry, 'session_deadline': current['deadline'], 'user': user_dto(user), **issued}
+        if reused:
+            raise ControlError(401, 'unauthenticated')
+        return result
 
     @app.get('/control/v1/session')
     async def session(request: Request):

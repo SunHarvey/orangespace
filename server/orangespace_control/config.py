@@ -23,6 +23,10 @@ def unique_object(pairs):
 class ControlConfig:
     database_url: str = field(repr=False)
     session_ttl_seconds: int = 3600
+    # Renewable sessions: a refresh credential lives refresh_ttl_seconds after
+    # its last use, and no session outlives session_max_seconds from login.
+    refresh_ttl_seconds: int = 1209600
+    session_max_seconds: int = 2592000
 
 
 def load_config(path: str | Path) -> ControlConfig:
@@ -35,13 +39,17 @@ def load_config(path: str | Path) -> ControlConfig:
         with os.fdopen(fd, 'r', encoding='utf-8') as stream:
             fd = None
             body = json.load(stream, object_pairs_hook=unique_object)
-        if not isinstance(body, dict) or set(body) - {'database_url', 'session_ttl_seconds'}:
+        if not isinstance(body, dict) or set(body) - {'database_url', 'session_ttl_seconds', 'refresh_ttl_seconds', 'session_max_seconds'}:
             raise ValueError()
         url = body.get('database_url')
         ttl = body.get('session_ttl_seconds', 3600)
+        refresh = body.get('refresh_ttl_seconds', 1209600)
+        maximum = body.get('session_max_seconds', 2592000)
         if not isinstance(url, str) or not url.startswith('mysql+pymysql://') or type(ttl) is not int or not 1 <= ttl <= 3600:
             raise ValueError()
-        return ControlConfig(url, ttl)
+        if type(refresh) is not int or type(maximum) is not int or not ttl <= refresh <= 7776000 or not refresh <= maximum <= 31536000:
+            raise ValueError()
+        return ControlConfig(url, ttl, refresh, maximum)
     except (OSError, ValueError, TypeError):
         raise ConfigError('invalid protected control configuration') from None
     finally:
