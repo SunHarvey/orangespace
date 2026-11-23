@@ -387,6 +387,8 @@ Windows 测试机端到端（一个沙盒，香港节点，测试账户 `qa-l3`�
 
 测试虚拟机上：`cargo fmt`、`cargo test --workspace`（含 12 项 `orangespace-https` 真实 TLS 测试）、`cargo clippy -D warnings` 通过；Windows 全量构建与 ctest 16 项通过（`node-tls-rejection` 按环境跳过；删掉的 11 项只测旧路线）。重新构建的 `OrangeSpace.exe` 用 QA 账号登录、打开“香港 A”：运行中、节点在线、租约续期，容器出口为 43.103.54.114；停止后容器与运行目录清空。
 
+2026-11-23 补删节点一侧的静态 TUIC 部署材料：`deploy/` 下的 `Caddyfile`、`orangespace-node.service`、`orangespace-tuic.service`、`unbound.conf` 和 `scripts/node_config.py`，都是导入时的初版草案，L3 收尾后已不再使用，节点上的对应服务也早已删除。另外删除了 `scripts/smoke_node.py`：它用环境变量传 SQLite 地址，现在的节点拒绝这样启动，已无法运行；它测的多用户文件隔离由服务端测试覆盖。`deploy/README.md` 改为现行部署入口的索引（中心 `server/deploy/install-control`、节点 `linux-desktop/node`、安装包 `deploy/windows`），根 README 中过时的说法同时更正。
+
 ## L5 安装与升级
 
 - **安装器**：

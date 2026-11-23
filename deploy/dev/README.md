@@ -1,6 +1,6 @@
 # Linux 开发控制台入口（不安装数据库、不改反代/Trust）
 
-前提：已安装 `server` Python 包的 Python 3.12+ venv；现有 MySQL 8.4 配置与显式迁移到 control_0006；已构建 `apps/control-console/dist`。配置仅放 owner-only 0600 普通文件，父目录受保护，绝不能放进 dist。服务不会自动建库/迁移/创建账号。
+前提：已安装 `server` Python 包的 Python 3.12+ venv；现有 MySQL 8.4 配置与显式迁移到最新版本（当前 control_0008）；已构建 `apps/control-console/dist`。配置仅放 owner-only 0600 普通文件，父目录受保护，绝不能放进 dist。服务不会自动建库/迁移/创建账号。
 
 ## 前台（优先用于首次诊断）
 
