@@ -136,7 +136,12 @@ void Centre::renew_locked() {
     if (log_) log_("Centre session refresh failed: " + reason(e));
     throw;
   }
-  if (log_) log_("Centre session refreshed");
+  if (log_) {
+    const auto offset = session_.centre_offset();
+    log_(offset > 2 || offset < -2 ? "Centre session refreshed (Centre clock " + std::string(offset > 0 ? "+" : "") +
+                                         std::to_string(offset) + " s from this one)"
+                                   : std::string("Centre session refreshed"));
+  }
   if (refreshed_) {
     try {
       refreshed_(session_);
@@ -162,6 +167,11 @@ auto Centre::with_renewal(F f) -> decltype(f()) {
   renew_locked();
   wake_.notify_all();  // the refresher picks up the new schedule
   return f();
+}
+
+std::int64_t Centre::clock_offset() const {
+  std::lock_guard lock(mutex_);
+  return session_.centre_offset();
 }
 
 ps::CentralIdentity Centre::identity() const {
@@ -514,8 +524,10 @@ void Engine::exchange(Worker& w) {
 
 void Engine::connect(Worker& w) {
   if (!w.node || w.node->session.expires_at() <= unix_seconds() + 60) exchange(w);
-  // Generations only rise, also across runs: the Centre refuses any other.
-  w.generation = (std::max)(w.generation + 1, unix_ms());
+  // Generations only rise, also across runs: the Centre refuses any other. They
+  // follow the Centre's clock, so a run after this clock was set back (it had
+  // been ahead) is not refused until it catches up again.
+  w.generation = next_generation(w.generation, unix_ms(), centre_.clock_offset());
   const auto tunnel = uuid4();
   const auto request = "{\"sandbox_id\":\"" + w.spec.id + "\",\"generation\":" + std::to_string(w.generation) +
                        ",\"tunnel_id\":\"" + tunnel + "\"}";

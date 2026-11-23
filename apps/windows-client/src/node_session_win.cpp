@@ -132,9 +132,32 @@ std::string unique_header(HINTERNET request, DWORD query, const wchar_t* name) {
     fail("duplicate response header");
   return result;
 }
+// The reply's single Date header as Unix seconds; 0 when it has none, more
+// than one, or one WinHTTP cannot read.
+std::int64_t reply_date(HINTERNET request) {
+  SYSTEMTIME date{};
+  DWORD size = sizeof(date), index = 0;
+  if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_DATE | WINHTTP_QUERY_FLAG_SYSTEMTIME, WINHTTP_HEADER_NAME_BY_INDEX,
+                           &date, &size, &index))
+    return 0;
+  SYSTEMTIME again{};
+  size = sizeof(again);
+  if (WinHttpQueryHeaders(request, WINHTTP_QUERY_DATE | WINHTTP_QUERY_FLAG_SYSTEMTIME, WINHTTP_HEADER_NAME_BY_INDEX,
+                          &again, &size, &index) || GetLastError() != ERROR_WINHTTP_HEADER_NOT_FOUND)
+    return 0;
+  FILETIME file{};
+  if (!SystemTimeToFileTime(&date, &file)) return 0;
+  ULARGE_INTEGER ticks{};
+  ticks.LowPart = file.dwLowDateTime;
+  ticks.HighPart = file.dwHighDateTime;
+  constexpr ULONGLONG unix_epoch = 116444736000000000ULL;  // 1970-01-01 in 100 ns since 1601
+  if (ticks.QuadPart <= unix_epoch) return 0;
+  return static_cast<std::int64_t>((ticks.QuadPart - unix_epoch) / 10000000ULL);
+}
 struct Response {
   unsigned status{};
   std::int64_t request_started_ms{};
+  std::int64_t date{};
   std::string node;
   SecretBytes body;
 };
@@ -206,6 +229,7 @@ class Transport {
     checked(WinHttpQueryHeaders(request.get(), WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                                WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX), "cannot inspect HTTPS status");
     response.status = status;
+    response.date = reply_date(request.get());
     if (node_header_required) response.node = unique_header(request.get(), WINHTTP_QUERY_CUSTOM, L"X-OrangeSpace-Node");
     if (status != 204) {
       const auto content_type = unique_header(request.get(), WINHTTP_QUERY_CONTENT_TYPE, WINHTTP_HEADER_NAME_BY_INDEX);
@@ -248,14 +272,14 @@ namespace detail {
 std::string read_admin_protected_config(const std::wstring& path) { return read_catalog(path); }
 void central_https_request(const NodeEntry& node, std::string_view method, std::string_view path,
     std::string_view body, std::string_view token,
-    const std::function<void(unsigned, std::string_view)>& receive) {
+    const std::function<void(unsigned, std::string_view, std::int64_t)>& receive) {
   require(node.api_prefix.empty() && path.starts_with("/control/v1/") && path.size()<=256);
   require(method=="GET" || method=="POST" || method=="DELETE");
   for(char c:path) require(c>=33 && c<=126 && c!='#' && c!='\\');
   if(!token.empty()) validate_token(token);
   Transport transport(node);
   auto reply=transport.request(ascii_wide(method).c_str(),ascii_wide(path).c_str(),body,token,false,false);
-  receive(reply.status,reply.body.view());
+  receive(reply.status,reply.body.view(),reply.date);
 }
 }
 TrustedCatalog TrustedCatalog::load(const std::wstring& explicit_path) {

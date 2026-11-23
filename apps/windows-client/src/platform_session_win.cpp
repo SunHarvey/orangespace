@@ -120,59 +120,71 @@ Response checked_response(Response response,unsigned expected) {
 }
 void Session::live() const {
   require(!token_.view().empty());
-  if(identity_.expires_at<=clock_()) { if(renewable()) throw AccessExpired(); require(false); }
+  if(identity_.expires_at<=earliest_now()) { if(renewable()) throw AccessExpired(); require(false); }
+}
+// The Centre's clock is the one its expiries are written in. A reply's Date
+// says where that clock is (to the second, a little behind by the time the
+// reply arrives); refusals keep their Date too.
+void Session::observe(const Response& response) {
+  if(response.date>0 && response.date<=nd::max_exact_integer) centre_offset_=response.date-clock_();
 }
 Response Session::request(std::string_view method,std::string_view path,std::string_view body,unsigned expected) {
-  live(); return checked_response(transport_->request(bootstrap_,method,path,body,token_.view()),expected);
+  live(); auto response=transport_->request(bootstrap_,method,path,body,token_.view()); observe(response);
+  return checked_response(std::move(response),expected);
 }
 Session Session::login(const PlatformConfig& config, std::string_view username, std::string_view password, Transport& transport, std::function<std::int64_t()> clock) {
   require(!username.empty() && username.size()<=256 && nd::safe_utf8(username,true) && !password.empty() && password.size()<=4096 && nd::safe_utf8(password));
   SecretText body; body.text.reserve(32768); body.text="{\"schema\":1,\"username\":";quote(body.text,username);body.text+=",\"password\":";quote(body.text,password);body.text+=",\"renewable\":true}";
   require(body.text.size()<=16384);
-  auto response=checked_response(transport.request(config.bootstrap_,"POST","/control/v1/auth/login",body.text,{}),200);
+  auto reply=transport.request(config.bootstrap_,"POST","/control/v1/auth/login",body.text,{});
+  const auto offset=reply.date>0 && reply.date<=nd::max_exact_integer ? reply.date-clock() : 0;
+  auto response=checked_response(std::move(reply),200);
   wire(response.body.view()); nd::JsonGuard doc(response.body.view()); schema(doc.value,11);
   require(nd::text(nd::field(doc.value,"token_type"))=="bearer");
   const auto& token=nd::text(nd::field(doc.value,"access_token")); nd::validate_token(token);
   const auto& renewal=nd::text(nd::field(doc.value,"refresh_token")); nd::validate_token(renewal); require(renewal!=token);
-  auto i=parse_identity(doc.value,clock());
+  const auto centre=clock()+(offset<0 ? offset : 0);  // the earlier clock
+  auto i=parse_identity(doc.value,centre);
   i.deadline=nd::integer(nd::field(doc.value,"session_deadline"));
   const auto renewal_expiry=nd::integer(nd::field(doc.value,"refresh_expires_at"));
-  require(i.expires_at<=i.deadline && renewal_expiry>clock() && renewal_expiry<=i.deadline);
+  require(i.expires_at<=i.deadline && renewal_expiry>centre && renewal_expiry<=i.deadline);
   std::vector<NodeRef> initial;page_items(doc.value,"nodes",initial); const auto next=cursor(doc.value,"nodes_next_cursor");
   require(next.empty() || (!initial.empty() && next==initial.back().node_id));
   Session result(config.bootstrap_,std::move(i),SerializedSecret(token),transport,std::move(clock));
+  result.centre_offset_=offset;
   result.refresh_=SerializedSecret(renewal); result.refresh_expires_at_=renewal_expiry; result.schedule();
   result.revalidate(); return result;
 }
 // Renew once half of the access lifetime is gone, by the Centre's clock as far
 // as it is known here. A fresh credential always has life left at the Centre;
-// if the known lead says otherwise, this clock has been corrected since: drop it.
+// if a lead learnt from a refusal says otherwise, this clock has been corrected
+// since: drop it. renew_at() is on this session's own clock.
 void Session::schedule() {
-  const auto now=clock_(); auto left=identity_.expires_at-(now+centre_lead_);
-  if(left<=0) { centre_lead_=0; left=identity_.expires_at-now; }
+  const auto now=clock_(); auto left=identity_.expires_at-(now+centre_offset_);
+  if(left<=0) { centre_offset_=0; left=identity_.expires_at-now; }
   renew_at_=now+(std::max<std::int64_t>)(0,left/2);
 }
 void Session::expired_at_centre() noexcept {
-  const auto lead=identity_.expires_at-clock_(); if(lead>centre_lead_) centre_lead_=lead;
+  const auto lead=identity_.expires_at-clock_(); if(lead>centre_offset_) centre_offset_=lead;
 }
 void Session::refresh() {
-  require(renewable() && identity_.deadline>clock_());
+  require(renewable() && identity_.deadline>earliest_now());
   SecretText body; body.text="{\"schema\":1,\"refresh_token\":"; quote(body.text,refresh_.view()); body.text+='}';
   Response response;
-  try { response=checked_response(transport_->request(bootstrap_,"POST","/control/v1/auth/refresh",body.text,{}),200); }
+  try { auto reply=transport_->request(bootstrap_,"POST","/control/v1/auth/refresh",body.text,{}); observe(reply); response=checked_response(std::move(reply),200); }
   catch(const HttpStatusError& e) { if(e.status_code()==401) refresh_.clear(); throw; }
   wire(response.body.view()); nd::JsonGuard doc(response.body.view()); schema(doc.value,9);
   require(nd::text(nd::field(doc.value,"token_type"))=="bearer");
   const auto& token=nd::text(nd::field(doc.value,"access_token")); nd::validate_token(token);
   const auto& renewal=nd::text(nd::field(doc.value,"refresh_token")); nd::validate_token(renewal); require(renewal!=token);
-  auto i=parse_identity(doc.value,clock_()); same_subject(identity_,i);
+  auto i=parse_identity(doc.value,earliest_now()); same_subject(identity_,i);
   require(nd::integer(nd::field(doc.value,"session_deadline"))==identity_.deadline && i.expires_at<=identity_.deadline);
   const auto renewal_expiry=nd::integer(nd::field(doc.value,"refresh_expires_at"));
-  require(renewal_expiry>clock_() && renewal_expiry<=identity_.deadline);
+  require(renewal_expiry>earliest_now() && renewal_expiry<=identity_.deadline);
   token_=SerializedSecret(token); refresh_=SerializedSecret(renewal); refresh_expires_at_=renewal_expiry; identity_.expires_at=i.expires_at; schedule();
 }
 SerializedSecret Session::export_renewal() const {
-  require(renewable() && identity_.deadline>clock_() && refresh_expires_at_>clock_());
+  require(renewable() && identity_.deadline>earliest_now() && refresh_expires_at_>earliest_now());
   SecretText text; text.text.reserve(1024);
   text.text="{\"schema\":1,\"namespace\":\"orangespace.platform.renewal\",\"api_origin\":";quote(text.text,bootstrap_.api_origin);
   text.text+=",\"central_user_id\":";quote(text.text,identity_.central_user_id);
@@ -202,7 +214,7 @@ Session Session::resume(const PlatformConfig& config,std::string_view input,Tran
 }
 void Session::revalidate() {
   auto r=request("GET","/control/v1/session",{},200);wire(r.body.view());nd::JsonGuard doc(r.body.view());schema(doc.value,4);
-  same(identity_,parse_identity(doc.value,clock_()));
+  same(identity_,parse_identity(doc.value,earliest_now()));
 }
 SerializedSecret Session::export_envelope() const {
   live(); SecretText text; text.text.reserve(1024);
@@ -242,7 +254,7 @@ ExchangeTicket Session::issue(std::string_view id) {
   auto r=request("POST","/control/v1/node-exchanges",body.text,201);wire(r.body.view());nd::JsonGuard doc(r.body.view());schema(doc.value,5);
   ExchangeTicket ticket;ticket.exchange_id=nd::text(nd::field(doc.value,"exchange_id"));ticket.node_id=nd::text(nd::field(doc.value,"node_id"));
   ticket.expires_at=nd::integer(nd::field(doc.value,"expires_at"));const auto& token=nd::text(nd::field(doc.value,"exchange_token"));nd::validate_token(token);
-  require(nd::uuid(ticket.exchange_id) && ticket.node_id==id && ticket.expires_at>clock_() && ticket.expires_at<=identity_.deadline);
+  require(nd::uuid(ticket.exchange_id) && ticket.node_id==id && ticket.expires_at>earliest_now() && ticket.expires_at<=identity_.deadline);
   ticket.exchange_token=SerializedSecret(token);return ticket;
 }
 #ifdef _WIN32
@@ -255,8 +267,8 @@ class SharedWindowsTransport final : public Transport {
     require(checked.host==bootstrap.host && checked.port==bootstrap.port);
     nd::NodeEntry node;node.host=checked.host;node.port=checked.port;node.ca_pem=bootstrap.ca_pem;
     Response response;
-    nd::central_https_request(node,method,path,body,token,[&](unsigned status,std::string_view bytes) {
-      response.status=status;response.body=SerializedSecret(bytes);
+    nd::central_https_request(node,method,path,body,token,[&](unsigned status,std::string_view bytes,std::int64_t date) {
+      response.status=status;response.body=SerializedSecret(bytes);response.date=date;
     });
     return response;
   }

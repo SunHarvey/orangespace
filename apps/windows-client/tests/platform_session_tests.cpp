@@ -18,7 +18,11 @@ struct Fake final : Transport {
   // The Centre rotates both credentials on each refresh: access 'A'+n, refresh 'R'+n.
   char access='A', renewal='R'; int expiry=5000;
   char stale=0;  // the Centre's clock is ahead: this access credential has already expired there
+  std::int64_t date=0;  // the Centre's clock as its replies' Date header gives it (0: no header)
   Response request(const Bootstrap& b, std::string_view method, std::string_view path, std::string_view body, std::string_view bearer) override {
+    auto r=answer(b,method,path,body,bearer); r.date=date; return r;
+  }
+  Response answer(const Bootstrap& b, std::string_view method, std::string_view path, std::string_view body, std::string_view bearer) {
     assert(b.api_origin=="https://centre.example.test");
     if(path=="/control/v1/auth/refresh") {
       assert(method=="POST" && bearer.empty() && body.find("\"refresh_token\":\""+std::string(43,renewal)+"\"")!=body.npos);
@@ -157,6 +161,48 @@ void centre_renews_on_refusal() {
   bool refused=false; try{(void)centre.nodes();}catch(const HttpStatusError& e){refused=e.status_code()==401;}
   assert(refused && fake.refreshes==2);
 }
+// This machine's clock runs ahead of the Centre's (here by 5000 s, more than an
+// access lifetime): from the replies' Date the session knows the Centre's
+// clock, so it signs in, keeps its exchange tickets (30 s at the Centre) and
+// renews by the Centre's clock. Without a Date it cannot, as before.
+void clock_ahead_of_centre() {
+  auto config=detail::TestAccess::config(); Fake fake; std::int64_t now=6000; auto clock=[&now] {return now;};
+  bool refused=false; try{(void)Session::login(config,"alice","password-for-test",fake,clock);}catch(const std::runtime_error&){refused=true;} assert(refused);
+  fake.date=1000;
+  auto s=Session::login(config,"alice","password-for-test",fake,clock);
+  assert(s.centre_offset()==-5000 && s.identity().expires_at==5000 && s.renew_at()==8000);
+  auto ticket=s.issue(nid); assert(ticket.expires_at==1020);
+  now=7000; fake.date=2000; assert(s.nodes().size()==2);  // 5000 is past here, not at the Centre
+  now=8000; fake.date=3000; s.refresh(); assert(s.identity().expires_at==6800 && s.renew_at()==9900);
+  // A reply without Date keeps what the last one showed.
+  fake.date=0; now=8100; s.revalidate(); assert(s.centre_offset()==-5000);
+  // A short lead (a ticket's 30 s) was already enough to refuse every ticket.
+  Fake plain; now=1100;
+  auto t=Session::login(config,"alice","password-for-test",plain,clock);
+  refused=false; try{(void)t.issue(nid);}catch(const std::runtime_error&){refused=true;} assert(refused);
+  plain.date=1000; t.revalidate(); assert(t.centre_offset()==-100 && t.issue(nid).expires_at==1020);
+}
+// A reply's Date also shows a Centre clock that is ahead, before any refusal,
+// and replaces a lead learnt from a refusal.
+void centre_ahead_by_date() {
+  auto config=detail::TestAccess::config(); Fake fake; std::int64_t now=1000; auto clock=[&now] {return now;};
+  fake.date=4000;
+  auto s=Session::login(config,"alice","password-for-test",fake,clock);
+  assert(s.centre_offset()==3000 && s.renew_at()==1500);
+  s.expired_at_centre(); assert(s.centre_offset()==4000);
+  s.refresh(); assert(s.centre_offset()==3000 && s.identity().expires_at==6800 && s.renew_at()==1000+(6800-4000)/2);
+}
+// Tunnel generations follow the Centre's clock and still only rise.
+void generations() {
+  using orangespace::sandbox::next_generation;
+  assert(next_generation(0, 7000000, -5000)==2000000);  // this clock ahead: the Centre's time
+  assert(next_generation(0, 1000000, 600)==1600000);
+  assert(next_generation(2000500, 7000000, -5000)==2000501);  // never below the last one
+  // The window's Centre reports the offset its session learnt.
+  auto config=detail::TestAccess::config(); Fake fake; fake.date=1000; std::atomic<std::int64_t> now{1600}; auto clock=[&now] {return now.load();};
+  orangespace::sandbox::Centre centre(Session::login(config,"alice","password-for-test",fake,clock),{},{},std::chrono::milliseconds(50));
+  assert(centre.clock_offset()==-600);
+}
 int main() {
   try {
     auto b = detail::validate_bootstrap(R"({"schema":1,"api_origin":"https://centre.example.test"})");
@@ -170,6 +216,9 @@ int main() {
     centre_lead();
     centre_follows_clock();
     centre_renews_on_refusal();
+    clock_ahead_of_centre();
+    centre_ahead_by_date();
+    generations();
     std::cout << "platform bootstrap/session/pagination/identity tests passed\n";
   } catch (const std::exception&) { std::cerr << "platform bootstrap test failed\n"; return 1; }
 }

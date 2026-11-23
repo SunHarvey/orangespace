@@ -150,6 +150,15 @@ if(WIN32)
     if(MSVC)
       target_compile_options(orangespace-tunnel-replay-check PRIVATE /W4 /permissive- /utf-8)
     endif()
+    # Manual check of the Centre clock offset against the real Centre; not in ctest.
+    add_executable(orangespace-centre-clock-check tests/centre_clock_native_win.cpp)
+    target_link_libraries(orangespace-centre-clock-check PRIVATE orangespace_node_session)
+    if(MINGW)
+      target_link_options(orangespace-centre-clock-check PRIVATE -municode)
+    endif()
+    if(MSVC)
+      target_compile_options(orangespace-centre-clock-check PRIVATE /W4 /permissive- /utf-8)
+    endif()
     # Explicit headless fixture; native execution is opt-in, never on startup.
     add_executable(orangespace-file-directory-native-tests WIN32
       tests/file_transfer_directory_native_win.cpp src/file_transfer_win.cpp)

@@ -27,8 +27,8 @@ class HttpStatusError final : public std::runtime_error {
   unsigned status_code() const noexcept { return status_; }
  private: unsigned status_;
 };
-// The access credential has expired by this computer's clock while the session
-// is still renewable: a refresh is due (for example the Centre could not be
+// The access credential has expired by this computer's clock and by the
+// Centre's (as far as known here) while the session is still renewable: a refresh is due (for example the Centre could not be
 // reached when it was). Calls fail with this until a refresh succeeds.
 class AccessExpired final : public std::runtime_error {
  public:
@@ -74,7 +74,9 @@ class PlatformConfig {
 };
 // Explicit injectable request seam. Production uses the existing strict
 // WinHTTP implementation; injection does not bypass PlatformConfig protection.
-struct Response { unsigned status{}; SerializedSecret body; };
+// date: the Centre's clock from the reply's Date header (Unix seconds), 0 when
+// the reply has none (the app-private HTTPS path reports none).
+struct Response { unsigned status{}; SerializedSecret body; std::int64_t date{}; };
 class Transport {
  public:
   virtual ~Transport() = default;
@@ -119,10 +121,16 @@ class Session {
   // Seconds until renew_at() by this session's clock (0 when due).
   std::int64_t renew_in() const { const auto left = renew_at_ - clock_(); return left > 0 ? left : 0; }
   void refresh();
-  // The Centre refused the access credential (401) before its expiry by this
-  // clock: the Centre's clock is ahead by at least the time left here. Later
-  // renewals are scheduled that much earlier.
+  // The Centre refused the access credential (401) before its expiry by its
+  // clock as known here: it is ahead by at least the time left. Later renewals
+  // are scheduled that much earlier (until a reply's Date says otherwise).
   void expired_at_centre() noexcept;
+  // Seconds the Centre's clock is ahead of this session's clock (negative:
+  // behind). Each Centre reply with a Date header sets it. Renewals are timed
+  // by the Centre's clock; its expiries are checked against the earlier of the
+  // two clocks, so a machine whose clock runs ahead still accepts what the
+  // Centre has just issued.
+  std::int64_t centre_offset() const noexcept { return centre_offset_; }
   // Serialization only: no central DPAPI persistence is implemented here.
   // Parent must use a separate central namespace/entropy/file, never old blobs.
   SerializedSecret export_envelope() const;
@@ -137,12 +145,14 @@ class Session {
   void schedule();
   Response request(std::string_view method, std::string_view path, std::string_view body, unsigned expected);
   void live() const;
+  std::int64_t earliest_now() const { const auto now = clock_(); return centre_offset_ < 0 ? now + centre_offset_ : now; }
+  void observe(const Response&);
   Bootstrap bootstrap_;
   CentralIdentity identity_;
   SerializedSecret token_;
   SerializedSecret refresh_;
   std::int64_t renew_at_{}, refresh_expires_at_{};
-  std::int64_t centre_lead_{};  // seconds the Centre's clock is known to be ahead
+  std::int64_t centre_offset_{};  // see centre_offset()
   Transport* transport_;
   std::function<std::int64_t()> clock_;
 };

@@ -493,11 +493,12 @@ inline void private_https_request(const NodeEntry& node, std::string_view method
   receive(status,header,{reinterpret_cast<const char*>(output.bytes.data()),static_cast<std::size_t>(size)});
 }
 // Narrow shared Windows adapters. Same protected-handle ACL reader and strict
-// WinHTTP path, not a second transport. Central protocol has no node header.
+// WinHTTP path, not a second transport. Central protocol has no node header;
+// receive gets the reply's Date as Unix seconds (0 when absent or app-private).
 std::string read_admin_protected_config(const std::wstring& explicit_path);
 void central_https_request(const NodeEntry&, std::string_view method, std::string_view path,
     std::string_view body, std::string_view token,
-    const std::function<void(unsigned, std::string_view)>& receive);
+    const std::function<void(unsigned, std::string_view, std::int64_t)>& receive);
 } // namespace detail
 
 using LeaseBudget = detail::LeaseBudget;

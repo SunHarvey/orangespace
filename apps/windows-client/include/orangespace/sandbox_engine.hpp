@@ -17,6 +17,7 @@
 #include "orangespace/sandbox_status.hpp"
 #include "orangespace/wsl_runtime.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -52,6 +53,9 @@ class Centre final : public platform_session::SharedCentre {
   std::vector<platform_session::NodeRef> nodes() override;
   platform_session::ExchangeTicket issue(std::string_view node_id) override;
   void logout();
+  // Seconds the Centre's clock is ahead of this machine's (negative: behind),
+  // as its latest reply showed.
+  std::int64_t clock_offset() const;
 
  private:
   void keep_fresh() noexcept;
@@ -73,6 +77,12 @@ struct Spec {
   std::string node_id;  // bound node UUID
   std::string title;    // desktop window title (at most 64 characters)
 };
+
+// The next tunnel generation for a sandbox: above the previous one, and at
+// the Centre's clock in milliseconds (this clock plus the Centre's offset).
+inline std::int64_t next_generation(std::int64_t previous, std::int64_t local_ms, std::int64_t centre_offset_s) {
+  return (std::max)(previous + 1, local_ms + centre_offset_s * 1000);
+}
 
 class Engine {
  public:
